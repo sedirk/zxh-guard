@@ -1,0 +1,73 @@
+{
+  "_说明": "复制为 config.json，再在本机填写学号、统一认证密码和智小航 API Key；不要提交真实凭据。修改后重启插件或托盘以确保生效。",
+  "studentId": "",
+  "password": "",
+  "apiKey": "",
+  "baseUrl": "https://token.nuaa.edu.cn/v1",
+  "gatewayPort": 41900,
+  "rateLimit": {
+    "rpm": 28,
+    "windowMs": 60000
+  },
+  "tunnel": {
+    "enabled": true,
+    "exePath": "bin/zju-connect.exe",
+    "server": "v.nuaa.edu.cn",
+    "port": 443,
+    "protocol": "easyconnect",
+    "httpBind": "127.0.0.1:11081",
+    "socksBind": "127.0.0.1:11080",
+    "bindInterface": "",
+    "proxyDomains": [],
+    "startTimeoutMs": 25000,
+    "idleTimeoutMs": 1200000,
+    "extraArgs": []
+  },
+  "campusClient": {
+    "enabled": true,
+    "httpBind": "127.0.0.1:11081",
+    "socksBind": "127.0.0.1:11080",
+    "domains": [
+      "nuaa.edu.cn"
+    ],
+    "startTimeoutMs": 30000
+  },
+  "vpnInterface": {
+    "bindEnabled": true,
+    "namePattern": "sangfor|easyconnect|easy connect|ssl vpn|vnic",
+    "cidrs": [],
+    "localAddress": ""
+  },
+  "probe": {
+    "timeoutMs": 6000,
+    "cacheMs": 30000
+  },
+  "retry": {
+    "maxRetries": 5,
+    "minDelayMs": 1000,
+    "maxDelayMs": 300000,
+    "emptyStreamRetries": 1,
+    "hintlessBackoff": false,
+    "hintlessBaseDelayMs": 5000
+  },
+  "sanitize": {
+    "enabled": true,
+    "maxNoticeChars": 200,
+    "notice": "⚠️ 智小航：校园网隧道未就绪或认证失败，请检查学号密码或网络",
+    "reminderKeys": [
+      "仅限校内访问",
+      "校外访问",
+      "校园网",
+      "统一身份认证",
+      "请先登录",
+      "登录超时",
+      "无权限访问"
+    ],
+    "weakReminderKeys": [
+      "登录",
+      "认证",
+      "VPN"
+    ]
+  },
+  "upstreamTimeoutMs": 600000
+}

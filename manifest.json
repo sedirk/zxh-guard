@@ -1,0 +1,267 @@
+{
+  "schemaVersion": 1,
+  "id": "local.zhixiaohang-guard",
+  "name": "南航智小航守护网关",
+  "version": "1.0.1",
+  "description": "南航智小航（https://token.nuaa.edu.cn/v1）专属本地守护网关：彻底无视系统代理（启动即清除 HTTP_PROXY/HTTPS_PROXY/ALL_PROXY 并自建直连 Agent），按需拉起私有 zju-connect EasyConnect 隧道（默认不启动，探测到校外才启动，闲置 20 分钟自动关闭），检测官方 Sangfor 虚拟网卡并用 localAddress 绑定发包，28 RPM 滑动窗口排队限流，校外 HTML/乱码响应拦截净化，429 冷却耐心重试与空流自动重试，同时转发 /v1/chat/completions 与 /v1/responses。",
+  "main": "main.js",
+  "permissions": [
+    "provider.register",
+    "background.service"
+  ],
+  "net": {
+    "domains": [
+      "token.nuaa.edu.cn",
+      "v.nuaa.edu.cn"
+    ]
+  },
+  "engines": {
+    "piDesktop": ">=0.9.0"
+  },
+  "activationEvents": [
+    "onStartup"
+  ],
+  "contributes": {
+    "services": [
+      {
+        "id": "zhixiaohang-gateway",
+        "label": "智小航本地守护网关"
+      }
+    ],
+    "commands": [
+      {
+        "id": "zhixiaohang.status",
+        "title": "智小航: 显示网关状态",
+        "category": "AI",
+        "keywords": [
+          "zhixiaohang",
+          "智小航",
+          "状态",
+          "status",
+          "隧道",
+          "tunnel"
+        ]
+      },
+      {
+        "id": "zhixiaohang.probe",
+        "title": "智小航: 网络探测诊断",
+        "category": "AI",
+        "keywords": [
+          "zhixiaohang",
+          "智小航",
+          "探测",
+          "probe",
+          "诊断",
+          "代理",
+          "网络"
+        ]
+      },
+      {
+        "id": "zhixiaohang.catalog",
+        "title": "智小航: 同步模型目录",
+        "category": "AI",
+        "keywords": [
+          "zhixiaohang",
+          "智小航",
+          "模型",
+          "models",
+          "刷新"
+        ]
+      },
+      {
+        "id": "zhixiaohang.tunnel-stop",
+        "title": "智小航: 立即关闭私有隧道",
+        "category": "AI",
+        "keywords": [
+          "zhixiaohang",
+          "智小航",
+          "隧道",
+          "tunnel",
+          "stop"
+        ]
+      },
+      {
+        "id": "zhixiaohang.campus-vpn-start",
+        "title": "智小航: 启动校内 VPN（浏览客户端）",
+        "category": "AI",
+        "keywords": [
+          "zhixiaohang",
+          "智小航",
+          "vpn",
+          "校内",
+          "浏览"
+        ]
+      },
+      {
+        "id": "zhixiaohang.campus-vpn-stop",
+        "title": "智小航: 关闭校内 VPN（浏览客户端）",
+        "category": "AI",
+        "keywords": [
+          "zhixiaohang",
+          "智小航",
+          "vpn",
+          "关闭"
+        ]
+      }
+    ],
+    "providers": [
+      {
+        "id": "zhixiaohang",
+        "name": "南航智小航",
+        "vendorKey": "zhixiaohang",
+        "baseUrl": "http://127.0.0.1:41900/v1",
+        "apiStyle": "chat_completions",
+        "authKind": "none",
+        "models": [
+          {
+            "id": "deepseek-flash",
+            "name": "DeepSeek flash",
+            "contextWindow": 1024000,
+            "maxTokens": 1024000,
+            "supportsImages": true
+          },
+          {
+            "id": "deepseek-v4-pro-0813",
+            "name": "DeepSeek-V4-Pro 0813正式版",
+            "contextWindow": 1024000,
+            "maxTokens": 1024000,
+            "supportsImages": false
+          },
+          {
+            "id": "deepseek-v4.1-flash",
+            "name": "DeepSeek V4.1 Flash",
+            "contextWindow": 1000000,
+            "maxTokens": 384000,
+            "supportsImages": false
+          },
+          {
+            "id": "deepseek/deepseek-v4-pro-0813",
+            "name": "DeepSeek-V4-Pro 0813正式版",
+            "contextWindow": 1024000,
+            "maxTokens": 1024000,
+            "supportsImages": false
+          },
+          {
+            "id": "deepseek/deepseek-v4.1-flash",
+            "name": "DeepSeek-V4.1-Flash",
+            "contextWindow": 1024000,
+            "maxTokens": 1024000,
+            "supportsImages": true
+          },
+          {
+            "id": "glm-5.3",
+            "name": "GLM-5.3",
+            "contextWindow": 1000000,
+            "maxTokens": 128000,
+            "supportsImages": false
+          },
+          {
+            "id": "glm-5.3-flash",
+            "name": "GLM-5.3-Flash",
+            "contextWindow": 1000000,
+            "maxTokens": 128000,
+            "supportsImages": true
+          },
+          {
+            "id": "glm-5.3-flashx",
+            "name": "GLM-5.3-FlashX",
+            "contextWindow": 1000000,
+            "maxTokens": 128000,
+            "supportsImages": true
+          },
+          {
+            "id": "hy3",
+            "name": "Hy3",
+            "contextWindow": 256000,
+            "maxTokens": 128000,
+            "supportsImages": false
+          },
+          {
+            "id": "hy4-preview",
+            "name": "Hy4 preview",
+            "contextWindow": 1024000,
+            "maxTokens": 64000,
+            "supportsImages": false
+          },
+          {
+            "id": "kimi-k2.6",
+            "name": "Kimi K2.6",
+            "contextWindow": 256000,
+            "maxTokens": 256000,
+            "supportsImages": true
+          },
+          {
+            "id": "kimi-k2.7-code",
+            "name": "Kimi K2.7 Code",
+            "contextWindow": 256000,
+            "maxTokens": 256000,
+            "supportsImages": true
+          },
+          {
+            "id": "kimi-k2.7-code-highspeed",
+            "name": "Kimi K2.7 Code Highspeed",
+            "contextWindow": 256000,
+            "maxTokens": 256000,
+            "supportsImages": true
+          },
+          {
+            "id": "kimi-k2.8-preview",
+            "name": "Kimi K2.8 Preview",
+            "contextWindow": 1024000,
+            "maxTokens": 1024000,
+            "supportsImages": true
+          },
+          {
+            "id": "kimi-k3",
+            "name": "Kimi K3",
+            "contextWindow": 1000000,
+            "maxTokens": 1000000,
+            "supportsImages": true
+          },
+          {
+            "id": "mimo-v2.6-flash",
+            "name": "MiMo V2.6 Flash",
+            "contextWindow": 1050000,
+            "maxTokens": 128000,
+            "supportsImages": true
+          },
+          {
+            "id": "mimo-v2.6-pro",
+            "name": "MiMo V2.6 Pro",
+            "contextWindow": 1050000,
+            "maxTokens": 128000,
+            "supportsImages": true
+          },
+          {
+            "id": "minimax-m2.7",
+            "name": "MiniMax M2.7",
+            "contextWindow": 196000,
+            "maxTokens": 128000,
+            "supportsImages": false
+          },
+          {
+            "id": "minimax-m3",
+            "name": "MiniMax M3",
+            "contextWindow": 1000000,
+            "maxTokens": 64000,
+            "supportsImages": true
+          },
+          {
+            "id": "minimax-m3.1-flash",
+            "name": "MiniMax M3.1 Flash",
+            "contextWindow": 1000000,
+            "maxTokens": 512000,
+            "supportsImages": true
+          },
+          {
+            "id": "step-5-preview",
+            "name": "Step 5 Preview",
+            "contextWindow": 1024000,
+            "maxTokens": 1024000,
+            "supportsImages": true
+          }
+        ]
+      }
+    ]
+  }
+}

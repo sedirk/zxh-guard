@@ -1,0 +1,48 @@
+# Local credentials (never commit, even inside subdirectories)
+config.json
+config.*.json
+!config.example.json
+config.json.*
+.env
+.env.*
+!.env.example
+credentials*
+secrets*
+*.pem
+*.key
+*.p12
+*.pfx
+.ssh/
+.aws/
+
+# Local state, logs, downloaded catalogs and backups
+*.log
+*.pid
+*.tmp
+*.bak
+*.old
+*.swp
+*~
+.models-upstream.json
+status.json
+MvSDKLog/
+logs/
+*.local.*
+
+# Generated distributions and third-party binaries (download from upstream)
+dist/
+node_modules/
+coverage/
+*.piplug
+*.zip
+*.7z
+*.tar.gz
+*.exe
+*.dll
+
+# Editor / OS state
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+Desktop.ini
