@@ -7,7 +7,11 @@
 ## 下载与准备
 
 - [下载源码 ZIP](https://github.com/sedirk/zxh-guard/archive/refs/heads/main.zip)，解压到固定目录；或 `git clone https://github.com/sedirk/zxh-guard.git`。
-- [插件安装包 / Releases](https://github.com/sedirk/zxh-guard/releases)。公开包不包含任何账号、密码或 API Key，也不内置第三方 VPN EXE。
+- [插件安装包 / Releases](https://github.com/sedirk/zxh-guard/releases)。发布资产分两种：
+  - `*-slim.piplug`：不含第三方 VPN EXE，按下面的步骤下载安装引擎；公开包不包含账号、密码或 API Key。
+  - `*-full.piplug`：内置未修改的 zju-connect v1.3.1、完整 AGPL-3.0 文本和 v1.3.1 对应源码包；约 15.7 MB。
+
+PI-Desktop 更新会按包内容替换插件目录：slim 包会把旧 EXE 清掉，full 包会保留内置引擎。两种包都不包含真实 `config.json`。
 - Windows 10/11 x64、Windows PowerShell 5.1。插件模式需要 PI-Desktop；独立托盘不需要 PI-Desktop 或 Node.js。开发测试需要 Node.js 22+。
 
 ### 1. 下载 VPN 引擎
@@ -52,16 +56,45 @@ notepad .\config.json
 
 模板端口：HTTP `127.0.0.1:11081`，SOCKS5 `127.0.0.1:11080`；托盘的 PAC 服务为 `http://127.0.0.1:41980/proxy.pac`。PAC 仅在托盘运行时可用。启用系统代理会影响其他应用，请勿与 v2rayN 等工具同时抢占系统代理设置。
 
-**已知限制**：PAC 重复切换、外部隧道状态、并发启动和代理恢复尚待完善。端口已监听不代表校园 HTTP 请求成功；若浏览器报代理错误，先在托盘清除代理，并核对 Windows 的代理设置。不要同时启动官方 VPN、多个托盘或多个独立 VPN 登录。
+#### 连接状态与按钮
+
+| 状态 | 反馈与可用操作 |
+| --- | --- |
+| 未连接 | 可点击「连接」，托盘启动时不会根据旧代理模式自动登录 |
+| 连接中 | 点击后立即禁用连接/重启，显示耗时；可「取消连接」 |
+| 正在断开/取消 | 不接受重复操作；等待当前任务结束或超时，再串行清理 |
+| 代理就绪 | 仅表示本机 HTTP/SOCKS 端口监听，可断开、重启或显式设置代理；不代表校园 HTTP/网站登录成功 |
+| 等待重试 | 显示 15 秒倒计时和失败次数，可取消；连续失败 3 次停止自动重试 |
+| 操作失败 | 「查看连接详情」保留最近错误；有残留的自有进程时先重试断开，否则可手动重试连接 |
+| 外部代理占用 | 不重复登录、不终止未知/插件进程，也不假定其支持校园浏览；请到原客户端管理 |
+
+重启严格按「停止完成 → 启动」执行；主动断开/取消不会触发重连。短暂就绪不会清空重试预算，持续就绪 60 秒才重置。退出也等待任务清理；停止失败且自有进程仍存在时保留托盘，供用户重试。默认启动超时 30 秒（`campusClient.startTimeoutMs`，3–180 秒），后台任务另有超时兜底。
+
+托盘一次只派发一个后台任务；CLI 用命名互斥锁串行化，重复启动返回忙碌（退出码 75），而不是再次登录。只凭 PID 不会终止进程，还需匹配引擎路径和创建时间。每次启动保留独立的临时日志；「连接详情」显示最近错误。
+
+**已知限制**：上述保护覆盖托盘/PowerShell CLI，**不等于与 Node 插件建立了统一跨进程锁**。PAC 重复切换、代理恢复和 Chrome 实际路由仍待完善；服务端主动关闭会话的根因尚未确认。不要同时发起插件、官方客户端与托盘的 VPN 登录；不要把端口就绪当成校园网站已验证。系统代理行读取当前 Windows 设置，不凭旧模式文件显示“已启用”。
 
 ### PI-Desktop 插件
 
 1. 从 Releases 下载 `.piplug`，在 PI-Desktop 插件页面安装；或使用 PI-Desktop 的本地开发插件加载方式选择本目录。
 2. 在**实际加载的插件目录**执行上面的 VPN 引擎安装步骤，并从 `config.example.json` 创建、填写 `config.json`。独立托盘读取其脚本所在插件目录的配置，不读取 PI-Desktop 数据目录。
-3. 启用插件并按提示授予 `provider.register` / `background.service` 权限。重启插件后，本机网关默认监听 `127.0.0.1:41900`。
-4. 使用「南航智小航」provider；也可在支持 OpenAI 兼容接口的客户端填入 `http://127.0.0.1:41900/v1`。
+3. 启用插件并按提示授予 `background.service` 权限。从旧版升级时，请用 1.1.4 的 `.piplug` 走插件页安装/更新：安装器会更新版本登记；只覆盖插件目录文件不会更新登记。本版不申请剪贴板权限，所以不会再出现 `clipboard.write` 审批。
+4. 插件不再声明只读模型。运行命令「智小航: 显示可编辑兼容服务配置」（能写剪贴板就复制，否则直接显示配置），按下一节的步骤在 PI-Desktop 中手动添加一次普通兼容服务。
 
 插件优先读插件数据目录中的 `config.json`，其次读插件目录。若配置不生效，请检查是否存在旧的数据目录配置。只在自己的电脑上使用本地网关：它没有本地调用方认证，本机其他进程也可能消耗你的 API 配额。
+
+#### 可编辑兼容服务
+
+插件声明的 provider 会被 PI-Desktop 标记为“由插件提供”，设置页只能启用/停用和填写 API Key，不能修改上下文窗口或推理档位。因此本项目不再提供插件模型，改为由你添加普通兼容服务：
+
+1. 设置 → AI 服务 → 添加服务 → 自定义端点。
+2. 名称填 `智小航（可编辑）`。
+3. Base URL 填 `http://127.0.0.1:41900/v1`。若网关因端口占用改到 41901–41904，以「智小航: 显示网关状态」为准；复制命令会自动使用实际端口。
+4. API 风格选 `Chat Completions`；认证选无 API Key（留空/免密钥）。
+5. 点击“获取模型列表”，选择需要的模型并保存。
+6. 在该服务的模型“高级”里设置上下文窗口、最大输出、推理档位；需要时打开“发送 `reasoning_effort`”。
+
+之后在输入框选择这个普通服务即可。它的上下文/推理设置由 PI-Desktop 保存，插件不再覆盖。旧版本安装可能仍保留只读的「南航智小航」provider；安装 1.1.4 后它不再被声明，若宿主仍显示旧行，请停用它。已有会话若绑定旧 provider，请在模型选择器切到新的普通服务。
 
 ## 网关功能与配置
 
@@ -91,21 +124,25 @@ notepad .\config.json
 
 ```powershell
 node test/run-tests.js
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File test/run-vpn-tests.ps1
 # git add 后检查暂存区，而不是仅检查工作目录
 node scripts/check-publication.js
+# full 包额外校验 AGPL 文本、固定哈希的 EXE 与源码包
+node scripts/check-publication.js --directory .\dist\<full-package-dir> --full
 ```
 
-测试主要使用模拟上游，不代表真实 Chrome/PAC 或 VPN 长稳验证。测试可能临时回写 manifest，建议在干净副本运行，完成后核对 `git diff`。
+测试主要使用模拟上游，不代表真实 Chrome/PAC 或 VPN 长稳验证。测试不再回写 manifest，建议在干净副本运行，完成后核对 `git diff`。
+生命周期套件含 20 项离线测试：纯状态转换、隔离假引擎的并发启动/超时/进程归属清理，以及真实 WinForms 菜单和看门狗事件（模拟副作用）。它不使用真实凭据、不登录 VPN、不写系统代理，并核对测试前后代理设置一致。
 
-`.gitignore` 排除了真实配置、环境文件、凭据/私钥、日志、临时状态、模型缓存、下载的 EXE 和 `dist/`。**忽略规则不保护已跟踪文件，也不控制插件打包器。** 发布前必须检查 Git 暂存区，并只从经过审查的 Git 文件构建干净目录；不要对含 `config.json` 的工作目录直接运行 PluginPack。
+`.gitignore` 排除了真实配置、环境文件、凭据/私钥、日志、临时状态、模型缓存、下载的 EXE 和 `dist/`；`third_party/zju-connect-v1.3.1-source.zip` 是固定哈希的例外，必须作为源码资产保留。**忽略规则不保护已跟踪文件，也不控制插件打包器。** 发布前必须检查 Git 暂存区，并只从经过审查的 Git 文件构建干净目录；不要对含 `config.json` 的工作目录直接运行 PluginPack。
 
 PI-Desktop 的 `PluginCheck` 验证干净目录后，用 `PluginPack` 生成 `.piplug`，并再次检查包内无 `config.json`、日志、私钥和真实凭据。不能用普通 ZIP 工具替代 PluginPack（插件格式要求 store-only ZIP）。
 
 ## 许可与来源
 
-本项目原创代码使用 [MIT License](LICENSE)。改编/参考项目的版权通知保留于 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)：
+本项目原创代码使用 [AGPL-3.0](LICENSE)。改编/参考项目中的 MIT 部分仍保留原 MIT 通知，见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)：
 
 - [dsh-zhixiaohang-guard](https://github.com/2277533612/dsh-zhixiaohang-guard)：净化、限流、空流识别（MIT）。
 - [dsh-cooldown-retry](https://github.com/dboycht/dsh-cooldown-retry)：冷却提示解析与重试（MIT）。
 - [opencode2pi-desktop](https://github.com/JasonYu0822/opencode2pi-desktop)：插件结构参考（MIT）。
-- [zju-connect](https://github.com/Mythologyli/zju-connect/tree/v1.3.1)：独立 VPN 引擎（AGPL-3.0），由用户从官方源下载，本仓库不再分发 EXE。
+- [zju-connect](https://github.com/Mythologyli/zju-connect/tree/v1.3.1)：独立 VPN 引擎（AGPL-3.0）。full 包内置未修改 EXE 与 v1.3.1 对应源码包；slim 包不含 EXE，由安装脚本从官方源下载并校验哈希。

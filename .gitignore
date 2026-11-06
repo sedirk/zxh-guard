@@ -29,12 +29,13 @@ MvSDKLog/
 logs/
 *.local.*
 
-# Generated distributions and third-party binaries (download from upstream)
+# Generated distributions and third-party binaries (pinned source archive excepted)
 dist/
 node_modules/
 coverage/
 *.piplug
 *.zip
+!third_party/zju-connect-v1.3.1-source.zip
 *.7z
 *.tar.gz
 *.exe

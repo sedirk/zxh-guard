@@ -39,10 +39,25 @@ SOFTWARE.
 
 ## zju-connect v1.3.1 — AGPL-3.0
 
-zju-connect is a separate executable by Mythologyli and contributors, launched
-as a child process. It is **not MIT-licensed** and is **not included** in this
-repository or its public plugin packages. The optional installer downloads an
-unmodified Windows amd64 release directly from the upstream project.
+zju-connect is a separate executable by Mythologyli and contributors. It
+remains under AGPL-3.0; this project's original code is also AGPL-3.0 (see
+`LICENSE`). The executable is an independent process and is not relicensed by
+this project.
+
+Distribution forms:
+
+- `*-slim.piplug` does **not** include `zju-connect.exe`. The installer
+  downloads the unmodified Windows amd64 v1.3.1 release from upstream and
+  verifies its SHA-256.
+- `*-full.piplug` includes the unmodified `bin/zju-connect.exe`
+  (SHA-256 `AEE7D8DBBF4DB98FBFF2B36D657094D95F3F6209DC3168914C62AEA01A8732BE`),
+  the complete AGPL-3.0 text in `LICENSE`, and the Corresponding Source archive
+  `third_party/zju-connect-v1.3.1-source.zip`
+  (SHA-256 `FA131DDA15A053E4D3D51F2BA0B79278B5129AF6FA7E5AFFC05EAFC2ECA825AB`).
+  No modifications were made to zju-connect.
+
+The source archive is also tracked in this repository at
+`third_party/zju-connect-v1.3.1-source.zip`.
 
 - Project: https://github.com/Mythologyli/zju-connect
 - Pinned release / binaries: https://github.com/Mythologyli/zju-connect/releases/tag/v1.3.1
@@ -50,6 +65,7 @@ unmodified Windows amd64 release directly from the upstream project.
 - Source download: https://github.com/Mythologyli/zju-connect/archive/refs/tags/v1.3.1.zip
 - License: https://github.com/Mythologyli/zju-connect/blob/v1.3.1/LICENSE
 
-The root MIT license does not relicense zju-connect or its dependencies.
-If you redistribute the executable yourself, review and comply with its own
-license and corresponding-source requirements.
+The MIT notices above apply only to the MIT-licensed portions; they do not
+relicense zju-connect or its dependencies. Keep `LICENSE`, this notice, and the
+source archive together when redistributing the full package. Do not add
+restrictions beyond AGPL-3.0 for the zju-connect binary.

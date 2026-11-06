@@ -7,7 +7,7 @@
  *   1. 清掉进程内所有 *_proxy 环境变量（模块 1）
  *   2. 读 config.json，建隧道管理器（默认不启动进程，模块 2）
  *   3. 起 127.0.0.1 本地网关，把 6 个模块串成一条链路
- *   4. 后台同步上游模型目录，写回 manifest.json（PI-Desktop 的 provider 声明）
+ *   4. 不声明插件 provider；由用户用命令显示可编辑兼容服务配置
  */
 
 const fs = require('node:fs');
@@ -23,7 +23,7 @@ const SERVICE_ID = 'zhixiaohang-gateway';
 const COMMANDS = {
   status: 'zhixiaohang.status',
   probe: 'zhixiaohang.probe',
-  catalog: 'zhixiaohang.catalog',
+  providerConfig: 'zhixiaohang.provider-config',
   tunnelStop: 'zhixiaohang.tunnel-stop',
   vpnStart: 'zhixiaohang.campus-vpn-start',
   vpnStop: 'zhixiaohang.campus-vpn-stop',
@@ -38,8 +38,6 @@ let browseTunnel = null;
 let gateway = null;
 let log = () => {};
 let proxyEnvRemoved = [];
-let hostReloadRequired = false;
-let catalogSynced = false;
 
 function writeLogLine(message) {
   const line = `[${new Date().toISOString()}] ${message}`;
@@ -65,7 +63,6 @@ function writeStatusFile() {
         proxyEnvRemoved,
         configSource: config ? config.source : null,
         warnings: config ? config.warnings : [],
-        hostReloadRequired,
         snapshot,
       }, null, 2),
       'utf8',
@@ -89,125 +86,6 @@ async function toast(message, kind = 'info') {
   log(message);
 }
 
-// --------------------------------------------------------------------------
-// manifest 写回：模型目录 / 端口变化后让 provider 声明与运行状态一致
-// --------------------------------------------------------------------------
-
-function manifestPath() {
-  return path.join(packageRoot, 'manifest.json');
-}
-
-function readManifest() {
-  try { return JSON.parse(fs.readFileSync(manifestPath(), 'utf8')); } catch { return null; }
-}
-
-function providerOf(manifest) {
-  const list = manifest && manifest.contributes && Array.isArray(manifest.contributes.providers)
-    ? manifest.contributes.providers
-    : [];
-  return list.find((entry) => entry && entry.id === 'zhixiaohang') || null;
-}
-
-/** 只在真正变化时写盘，避免文件监听触发无限重载。 */
-function syncDeclaration({ port, models } = {}) {
-  const manifest = readManifest();
-  const provider = providerOf(manifest);
-  if (!manifest || !provider) return { changed: false, reason: 'manifest 里没有 zhixiaohang provider 声明' };
-  let changed = false;
-
-  if (port && typeof provider.baseUrl === 'string') {
-    const next = `http://127.0.0.1:${port}/v1`;
-    if (provider.baseUrl !== next) { provider.baseUrl = next; changed = true; }
-  }
-  if (Array.isArray(models) && models.length > 0) {
-    const current = JSON.stringify(provider.models || []);
-    const next = JSON.stringify(models);
-    if (current !== next) { provider.models = models; changed = true; }
-  }
-  if (!changed) return { changed: false };
-
-  try {
-    fs.writeFileSync(manifestPath(), `${JSON.stringify(manifest, null, 2)}\n`, 'utf8');
-    hostReloadRequired = true;
-    log('manifest.json 已更新（需要重载插件让模型列表生效）');
-    return { changed: true };
-  } catch (error) {
-    log(`manifest.json 写入失败：${error && error.message}`);
-    return { changed: false, reason: 'write failed' };
-  }
-}
-
-/**
- * 上游 /v1/models 的真实形状：上下文与多模态都嵌在 model_info 里
- *   { id, object, owned_by, model_info: { display_name, context_window, max_tokens, input_modalities } }
- * 只读顶层字段会全部落到兜底值（131072 / 8192）——之前就是这样把 1.02M 覆盖掉的。
- * 这里以 model_info 为准，同时兼容 OpenAI 官方风格的顶层字段。
- */
-function modelsFromCatalog(payload) {
-  const list = payload && Array.isArray(payload.data) ? payload.data : [];
-  const seen = new Set();
-  const models = [];
-  const pick = (value) => {
-    const parsed = Number(value);
-    return Number.isFinite(parsed) && parsed > 0 ? Math.round(parsed) : 0;
-  };
-  for (const item of list) {
-    if (!item || typeof item !== 'object') continue;
-    const id = item.id || item.model || item.name;
-    if (typeof id !== 'string' || id.length === 0 || seen.has(id)) continue;
-    seen.add(id);
-    const info = item.model_info && typeof item.model_info === 'object' ? item.model_info : {};
-    const contextWindow = pick(info.context_window)
-      || pick(item.context_length) || pick(item.context_window) || pick(item.contextWindow) || pick(item.context);
-    const maxTokens = pick(info.max_tokens)
-      || pick(item.max_completion_tokens) || pick(item.max_output_tokens) || pick(item.maxTokens);
-    const modalities = Array.isArray(info.input_modalities)
-      ? info.input_modalities
-      : (Array.isArray(item.input_modalities) ? item.input_modalities : []);
-    models.push({
-      id,
-      name: (typeof info.display_name === 'string' && info.display_name.length > 0) ? info.display_name : id,
-      contextWindow: contextWindow || 131072,
-      maxTokens: maxTokens || 8192,
-      supportsImages: modalities.includes('image'),
-    });
-    if (models.length >= 64) break;
-  }
-  return models;
-}
-
-/** 通过当前判定出的路由取一次 /v1/models，用于同步模型目录。 */
-async function syncCatalogFromUpstream({ quiet = false } = {}) {
-  if (!config || !config.apiKey) return { ok: false, reason: 'apiKey 为空' };
-  try {
-    const route = await gateway.resolveRoute();
-    const url = `${config.baseUrl}/models`;
-    const { res } = await transport.sendUpstream({
-      url,
-      method: 'GET',
-      headers: { accept: 'application/json', authorization: `Bearer ${config.apiKey}` },
-      agent: route.agent,
-      timeoutMs: config.probe.timeoutMs,
-    });
-    const { buffer } = await transport.readBody(res, 2 * 1024 * 1024);
-    const text = buffer.toString('utf8');
-    if (/^\s*</.test(text)) return { ok: false, reason: '上游返回 HTML（校外/未认证）' };
-    const payload = JSON.parse(text);
-    const models = modelsFromCatalog(payload);
-    if (models.length === 0) return { ok: false, reason: '上游模型列表为空' };
-    const result = syncDeclaration({ models });
-    catalogSynced = true;
-    if (result.changed) {
-      log(`模型目录已同步：${models.map((m) => m.id).join(', ')}`);
-      if (!quiet) await toast(`智小航: 已同步 ${models.length} 个模型，请在插件页重载一次生效`, 'info');
-    }
-    return { ok: true, models: models.map((m) => m.id), changed: Boolean(result.changed) };
-  } catch (error) {
-    const reason = (error && (error.code || error.message)) || 'unknown';
-    log(`模型目录同步失败：${reason}`);
-    return { ok: false, reason };
-  }
-}
 
 // --------------------------------------------------------------------------
 // 服务生命周期
@@ -334,11 +212,6 @@ async function startService({ log: providedLog } = {}) {
   const port = await gateway.listen(candidates);
   writeStatusFile();
 
-  // 端口与声明不一致时更新 manifest（只有变化才写）
-  syncDeclaration({ port });
-  if (hostReloadRequired) {
-    await toast(`智小航: 网关监听 127.0.0.1:${port}，provider 声明已更新，请重载一次插件`, 'warning');
-  }
   return { port };
 }
 
@@ -366,6 +239,29 @@ function describeRoute() {
     : '尚未探测';
   return `${route} · ${probe} · ${nic}`;
 }
+function providerConfigText(port) {
+  let livePort = 0;
+  try {
+    if (gateway && typeof gateway.statusSnapshot === 'function') {
+      livePort = Number(gateway.statusSnapshot().port) || 0;
+    }
+  } catch { /* 网关未启动时使用配置端口 */ }
+  const explicit = Number(port) > 0 ? Number(port) : 0;
+  const configured = config && Number(config.gatewayPort) > 0 ? Number(config.gatewayPort) : 41900;
+  const chosen = explicit || livePort || configured;
+  return [
+    'PI-Desktop 可编辑兼容服务',
+    '名称: 智小航（可编辑）',
+    `Base URL: http://127.0.0.1:${chosen}/v1`,
+    'API 风格: Chat Completions',
+    '认证: 无 API Key（留空/免密钥）',
+    '模型示例: deepseek-flash, deepseek-v4.1-flash, glm-5.3, kimi-k3',
+    '',
+    '设置 → AI 服务 → 添加服务 → 自定义端点；粘贴 Base URL，认证留空，然后获取模型列表。',
+    '模型高级里可改上下文窗口、最大输出、推理档位和“发送 reasoning_effort”。',
+    '插件不再提供只读模型；若仍看到旧的“南航智小航”，请停用它。',
+  ].join('\n');
+}
 
 function registerCommands() {
   pi.commands.register({
@@ -382,7 +278,7 @@ function registerCommands() {
         + `隧道 ${t.state}${t.pid ? ` (pid ${t.pid})` : ''}${t.external ? ' [复用外部实例]' : ''} · 闲置 ${Math.round((t.idleTimeoutMs || 0) / 60000)} 分钟自动关闭\n`
         + `${describeRoute()}\n`
         + `请求 ${snapshot.counters.requests} · 净化 ${snapshot.counters.sanitized} · 429 重试 ${snapshot.counters.retries429} · 空流重试 ${snapshot.counters.emptyStreamRetries}\n`
-        + `代理环境变量已清除 ${proxyEnvRemoved.length} 个${snapshot.apiKeyPresent ? '' : ' · apiKey 未填写'}${hostReloadRequired ? ' · 需重载插件' : ''}`
+        + `代理环境变量已清除 ${proxyEnvRemoved.length} 个${snapshot.apiKeyPresent ? '' : ' · apiKey 未填写'}`
         + `${snapshot.lastError ? `\n最近错误: ${String(snapshot.lastError).slice(0, 160)}` : ''}`,
         snapshot.apiKeyPresent ? 'info' : 'warning',
       );
@@ -421,18 +317,26 @@ function registerCommands() {
   });
 
   pi.commands.register({
-    id: COMMANDS.catalog,
-    title: '智小航: 同步模型目录',
+    id: COMMANDS.providerConfig,
+    title: '智小航: 显示可编辑兼容服务配置',
     category: 'AI',
-    keywords: ['zhixiaohang', '智小航', '模型', 'models'],
+    keywords: ['zhixiaohang', '智小航', 'provider', '服务', '模型', '上下文', '推理'],
     run: async () => {
-      const result = await syncCatalogFromUpstream({ quiet: true });
-      if (!result.ok) { await toast(`智小航: 同步失败（${result.reason}）`, 'warning'); return; }
-      await toast(
-        `智小航: ${result.models.length} 个模型（${result.models.slice(0, 6).join(', ')}${result.models.length > 6 ? ' …' : ''}）`
-        + `${result.changed ? '，请重载插件生效' : '，无需变更'}`,
-        'info',
-      );
+      const text = providerConfigText();
+      try {
+        if (!pi.clipboard || typeof pi.clipboard.writeText !== 'function') {
+          throw new Error('clipboard unavailable');
+        }
+        await pi.clipboard.writeText(text);
+        await toast(
+          '智小航: 已复制兼容服务配置。请在 设置 → AI 服务 → 添加服务 → 自定义端点 中粘贴，认证留空。',
+          'info',
+        );
+      } catch (error) {
+        log(`显示兼容服务配置：剪贴板不可用（${(error && error.message) || 'unknown'}）`);
+        await toast('智小航: 剪贴板不可用，配置如下。', 'warning');
+        await toast(text.replace(/\n/g, ' | '), 'info');
+      }
     },
   });
 
@@ -522,11 +426,7 @@ module.exports = {
     writeStatusFile();
     log(`loaded · config=${config.source} · gatewayPort=${config.gatewayPort} · rpm=${config.rateLimit.rpm} · tunnel=${config.tunnel.enabled ? 'on-demand' : 'off'}`);
 
-    // 首轮模型目录同步放到后台，不阻塞 15s 的 onLoad 预算
-    setTimeout(() => {
-      if (catalogSynced) return;
-      void syncCatalogFromUpstream({ quiet: false });
-    }, 1500).unref?.();
+    log('provider 声明已移除；用命令“显示可编辑兼容服务配置”在 PI-Desktop 中手动添加普通兼容服务');
   },
 
   async onUnload() {
@@ -545,14 +445,10 @@ module.exports = {
     setConfig: (value) => { config = value; },
     setDataPath: (value) => { dataPath = value; },
     reloadConfig,
-    syncDeclaration,
-    modelsFromCatalog,
-    syncCatalogFromUpstream,
+    providerConfigText,
     startService,
     stopService,
     registerCommands,
     unregisterCommands,
-    readManifest,
-    providerOf,
   },
 };

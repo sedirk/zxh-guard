@@ -371,26 +371,13 @@ async function main() {
     assert.ok(cfg2.warnings.some((w) => w.includes('studentId')));
   });
 
-  await suite('模型目录: 从上游 model_info 读真实上下文/多模态（不再落到 131k 兜底）', async () => {
+  await suite('兼容服务: 生成可编辑配置，端口正确且不泄露凭据', async () => {
     const plugin = require(path.join(root, 'main.js'));
-    const models = plugin._internals.modelsFromCatalog({
-      data: [
-        { id: 'deepseek-flash', model_info: { display_name: 'DeepSeek flash', context_window: 1024000, max_tokens: 1024000, input_modalities: ['image', 'text'] } },
-        { id: 'glm-5.3', model_info: { display_name: 'GLM-5.3', context_window: 1000000, max_tokens: 128000, input_modalities: ['text'] } },
-        { id: 'legacy-top-level', context_length: 32768, max_completion_tokens: 4096 },
-        { id: 'bare-no-metadata' },
-      ],
-    });
-    assert.strictEqual(models.length, 4);
-    assert.strictEqual(models[0].contextWindow, 1024000, 'model_info.context_window 必须被读到');
-    assert.strictEqual(models[0].maxTokens, 1024000);
-    assert.strictEqual(models[0].name, 'DeepSeek flash');
-    assert.strictEqual(models[0].supportsImages, true);
-    assert.strictEqual(models[1].supportsImages, false);
-    assert.strictEqual(models[2].contextWindow, 32768, '兼容顶层 context_length');
-    assert.strictEqual(models[2].maxTokens, 4096);
-    assert.strictEqual(models[3].contextWindow, 131072, '完全没有元数据时才用兜底值');
-    assert.strictEqual(models[3].maxTokens, 8192);
+    const text = plugin._internals.providerConfigText(41977);
+    assert.match(text, /http:\/\/127\.0\.0\.1:41977\/v1/);
+    assert.match(text, /Chat Completions/);
+    assert.match(text, /无 API Key/);
+    assert.ok(!/TEST123|secret|test-key|password/i.test(text), '不得包含凭据');
   });
 
   await suite('模块2: 隧道默认不启动，参数与闲置关闭正确', async () => {
@@ -618,14 +605,16 @@ async function main() {
 
     const registered = { commands: [], services: [] };
     const toasts = [];
+    const copied = [];
     globalThis.pi = {
       plugin: { getDataPath: async () => dataDir, getSettings: async () => ({}) },
       commands: {
-        register: async (cmd) => { registered.commands.push(cmd.id); },
-        unregister: async (id) => { registered.commands = registered.commands.filter((x) => x !== id); },
+        register: async (cmd) => { registered.commands.push(cmd); },
+        unregister: async (id) => { registered.commands = registered.commands.filter((x) => x.id !== id); },
       },
       services: { register: (service) => { registered.services.push(service); } },
       ui: { showToast: async (message) => { toasts.push(message); } },
+      clipboard: { writeText: async (text) => { copied.push(text); } },
       net: { fetch: async () => { throw new Error('不应使用 pi.net.fetch'); } },
     };
     const previousEnv = { HTTPS_PROXY: 'http://127.0.0.1:7890', ALL_PROXY: 'socks5://127.0.0.1:1080' };
@@ -635,7 +624,7 @@ async function main() {
     await plugin.onLoad();
     assert.strictEqual(registered.services.length, 1, '必须注册 background service');
     assert.strictEqual(registered.services[0].id, 'zhixiaohang-gateway');
-    assert.deepStrictEqual(registered.commands.sort(), ['zhixiaohang.campus-vpn-start', 'zhixiaohang.campus-vpn-stop', 'zhixiaohang.catalog', 'zhixiaohang.probe', 'zhixiaohang.status', 'zhixiaohang.tunnel-stop']);
+    assert.deepStrictEqual(registered.commands.map((cmd) => cmd.id).sort(), ['zhixiaohang.campus-vpn-start', 'zhixiaohang.campus-vpn-stop', 'zhixiaohang.probe', 'zhixiaohang.provider-config', 'zhixiaohang.status', 'zhixiaohang.tunnel-stop']);
     assert.strictEqual(process.env.HTTPS_PROXY, undefined, 'onLoad 必须清掉代理变量');
     assert.strictEqual(process.env.ALL_PROXY, undefined);
 
@@ -657,18 +646,28 @@ async function main() {
     const statusFile = JSON.parse(fs.readFileSync(path.join(dataDir, 'status.json'), 'utf8'));
     assert.strictEqual(statusFile.snapshot.listening, true);
     assert.ok(Array.isArray(statusFile.proxyEnvRemoved));
+    const manifestNow = JSON.parse(manifestBackup);
+    assert.strictEqual(manifestNow.contributes.providers, undefined, 'manifest 不应再声明 provider');
+    assert.ok(!manifestNow.permissions.includes('provider.register'), '不应再申请 provider.register');
+    assert.ok(!manifestNow.permissions.includes('clipboard.write'), '不应要求剪贴板权限');
+    assert.ok(manifestNow.permissions.includes('background.service'), '后台服务权限必须保留');
 
-    // 模型目录同步写回 manifest（整个套件期间都要能回滚 manifest）
-    try {
-      const synced = await plugin._internals.syncCatalogFromUpstream({ quiet: true });
-      assert.strictEqual(synced.ok, true, `模型同步应成功：${synced.reason}`);
-      const rewritten = JSON.parse(fs.readFileSync(manifestFile, 'utf8'));
-      const provider = plugin._internals.providerOf(rewritten);
-      assert.strictEqual(provider.models[0].id, 'zhixiaohang-test-model');
-      assert.ok(provider.baseUrl.startsWith('http://127.0.0.1:'));
-    } finally {
-      fs.writeFileSync(manifestFile, manifestBackup, 'utf8');
-    }
+    // 插件不再声明 provider，也不应改写 manifest
+    assert.strictEqual(fs.readFileSync(manifestFile, 'utf8'), manifestBackup, '插件不应再改写 manifest');
+
+    const providerCommand = registered.commands.find((cmd) => cmd.id === 'zhixiaohang.provider-config');
+    assert.ok(providerCommand, '缺少显示兼容服务配置命令');
+    await providerCommand.run();
+    assert.strictEqual(copied.length, 1, '有剪贴板权限时应写入一次');
+    assert.ok(copied[0].includes(`http://127.0.0.1:${started.port}/v1`), `复制的地址不正确：${copied[0]}`);
+    const savedClipboard = globalThis.pi.clipboard;
+    delete globalThis.pi.clipboard;
+    await providerCommand.run();
+    assert.ok(
+      toasts.some((message) => message.includes(`http://127.0.0.1:${started.port}/v1`)),
+      '没有剪贴板权限时也应显示配置',
+    );
+    globalThis.pi.clipboard = savedClipboard;
 
     const status = registered.commands.length;
     assert.strictEqual(status, 6);

@@ -1,8 +1,8 @@
 ﻿<#
-  南航校内 VPN 托盘 v2
-  - 隧道由托盘自己托管（campus-vpn.ps1 -Standalone），不依赖 PI-Desktop
-  - 看门狗：每 3 秒检查；隧道掉了自动重连（15 秒节流），连续失败则自动撤销系统代理，避免浏览器卡在 ERR_PROXY_CONNECTION_FAILED
-  - 右键：自动配置系统代理 / PAC 模式 / 清除系统代理 / 不变更（还原）/ 启动·重启·停止 / 状态 / 退出
+  南航校内 VPN 托盘 v3
+  - 单一状态机管理连接、取消、停止、重启和重试；每次只运行一个后台操作
+  - 后台客户端另有跨进程互斥；主动停止不会触发自动重连
+  - 代理就绪仅表示端口可用，不冒充校园 HTTP 连通性验证
 #>
 param([switch]$SelfTest)
 
@@ -10,6 +10,8 @@ $ErrorActionPreference = 'Stop'
 try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch { }
 
 $here = $PSScriptRoot
+. (Join-Path $here 'vpn-lifecycle.ps1')
+. (Join-Path $here 'vpn-runtime.ps1')
 $pluginRoot = Split-Path -Parent $here
 $configFile = Join-Path $pluginRoot 'config.json'
 $clientPs1 = Join-Path $here 'campus-vpn.ps1'
@@ -20,7 +22,7 @@ $trayLog = Join-Path $env:TEMP 'nuaa-vpn-tray.log'
 $regPath = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings'
 
 function Write-TrayLog([string]$m) {
-  try { Add-Content -Path $trayLog -Value ("[" + (Get-Date -Format 'HH:mm:ss') + "] " + $m) -Encoding UTF8 } catch { }
+  try { Add-Content -Path $trayLog -Value ("[" + (Get-Date -Format 'yyyy-MM-dd HH:mm:ss.fff') + "] " + $m) -Encoding UTF8 } catch { }
 }
 trap {
   Write-TrayLog ("FATAL: " + $_.Exception.Message + " @ " + $_.InvocationInfo.PositionMessage)
@@ -31,8 +33,8 @@ trap {
 $cfg = $null
 if (Test-Path $configFile) { $cfg = Get-Content $configFile -Raw -Encoding UTF8 | ConvertFrom-Json }
 $client = if ($cfg) { $cfg.campusClient } else { $null }
-$httpBind = if ($client -and $client.httpBind) { [string]$client.httpBind } else { '127.0.0.1:11091' }
-$socksBind = if ($client -and $client.socksBind) { [string]$client.socksBind } else { '127.0.0.1:11090' }
+$httpBind = if ($client -and $client.httpBind) { [string]$client.httpBind } else { '127.0.0.1:11081' }
+$socksBind = if ($client -and $client.socksBind) { [string]$client.socksBind } else { '127.0.0.1:11080' }
 $gatewayPort = if ($cfg -and $cfg.gatewayPort) { [int]$cfg.gatewayPort } else { 41900 }
 $pacUrl = "http://127.0.0.1:$gatewayPort/proxy.pac"
 $script:domains = [string[]]@()
@@ -203,35 +205,46 @@ function Restore-ProxyBackup {
 }
 
 function Get-Tunnel {
-  if (Test-Path $pidFile) {
-    try {
-      $st = Get-Content $pidFile -Raw -Encoding UTF8 | ConvertFrom-Json
-      if ($st.external) {
-        $upExt = Test-Port $httpHost $httpPort 400
-        return [pscustomobject]@{ state = $(if ($upExt) { 'ready' } else { 'starting' }); pid = $null; http = [string]$st.http; socks = [string]$st.socks; external = $true }
-      }
-      if (Get-Process -Id $st.pid -ErrorAction SilentlyContinue) {
-        $up = Test-Port $httpHost $httpPort 400
-        return [pscustomobject]@{ state = $(if ($up) { 'ready' } else { 'starting' }); pid = $st.pid; http = [string]$st.http; socks = [string]$st.socks; external = $false }
-      }
-      Remove-Item $pidFile -Force -ErrorAction SilentlyContinue
-    } catch { }
+  Get-VpnSnapshot $pidFile (Join-Path $here 'zju-connect.exe') $httpBind $socksBind
+}
+function Clear-OwnedProxy {
+  $p = Get-ProxySnapshot
+  $ours = ($p.ProxyEnable -eq 1 -and $p.ProxyServer -eq $httpBind) -or
+    ($p.AutoConfigURL -and $p.AutoConfigURL -in @($script:pacUrlHttp, $pacUrl))
+  if ($ours) { Clear-SystemProxy }
+}
+function Start-VpnEffect {
+  if ($script:worker -or -not $script:lifecycle.Effect) { return }
+  $action = $script:lifecycle.Effect
+  $script:lifecycle.Effect = ''
+  $script:workerResult = Join-Path $env:TEMP ('nuaa-vpn-result-' + [guid]::NewGuid().ToString('N') + '.json')
+  $script:workerTimedOut = $false
+  try {
+    $argsList = @('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-WindowStyle','Hidden',
+      '-File',$clientPs1,'-Action',$action,'-Standalone','-ResultFile',$script:workerResult)
+    $script:worker = Start-Process -FilePath 'powershell.exe' -ArgumentList (($argsList | ForEach-Object { ConvertTo-VpnArgument $_ }) -join ' ') -WindowStyle Hidden -PassThru
+    Write-TrayLog ("operation=$action workerPid=" + $script:worker.Id)
+  } catch {
+    Complete-VpnOperation $script:lifecycle $false (Get-Tunnel).state '无法启动后台连接任务，请检查脚本路径。'
   }
-  return [pscustomobject]@{ state = 'stopped'; pid = $null; http = $httpBind; socks = $socksBind }
 }
-function Start-Tunnel {
-  Write-TrayLog 'start tunnel (standalone)'
-  Start-Process -FilePath 'powershell' -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden', '-File', $clientPs1, '-Action', 'start', '-Standalone') -WindowStyle Hidden | Out-Null
-}
-function Stop-Tunnel {
-  Write-TrayLog 'stop tunnel'
-  Start-Process -FilePath 'powershell' -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden', '-File', $clientPs1, '-Action', 'stop', '-Standalone') -WindowStyle Hidden | Out-Null
+function Invoke-TrayAction([string]$Action) {
+  if ($script:exitPending -and $Action -ne 'stop') { return }
+  if (Request-VpnAction $script:lifecycle $Action) {
+    if ($Action -in @('start','restart')) { $script:lastErrorShown = '' }
+    if ($Action -eq 'stop') { Clear-OwnedProxy }
+    Update-Ui | Out-Null # Reflect the accepted intent before spawning the worker.
+    Start-VpnEffect
+  } else { Write-TrayLog ("ignored action=$Action state=" + $script:lifecycle.State) }
 }
 
 function New-StateIcon([string]$state) {
   $color = switch ($state) {
     'ready' { [System.Drawing.Color]::FromArgb(46, 204, 113) }
     'starting' { [System.Drawing.Color]::FromArgb(241, 196, 15) }
+    'stopping' { [System.Drawing.Color]::FromArgb(241, 196, 15) }
+    'retry_wait' { [System.Drawing.Color]::FromArgb(230, 126, 34) }
+    'external' { [System.Drawing.Color]::FromArgb(52, 152, 219) }
     'failed' { [System.Drawing.Color]::FromArgb(231, 76, 60) }
     default { [System.Drawing.Color]::FromArgb(149, 165, 166) }
   }
@@ -247,141 +260,248 @@ function New-StateIcon([string]$state) {
   return [System.Drawing.Icon]::FromHandle($bmp.GetHicon())
 }
 
-# ---------------- SelfTest ----------------
-if ($SelfTest) {
-  Remove-Item $backupFile -Force -ErrorAction SilentlyContinue
-  Write-Host '=== 托盘 v2 自检 ==='
-  $t = Get-Tunnel
-  Write-Host ("[隧道] state=" + $t.state + " pid=" + $t.pid + " http=" + $t.http)
-  $before = Get-ProxySnapshot
-  Write-Host ("[原始代理] enable=" + $before.ProxyEnable + " server='" + $before.ProxyServer + "' auto='" + $before.AutoConfigURL + "'")
-  Set-GlobalProxy;   $g = Get-ProxySnapshot
-  Write-Host ("[自动配置] enable=" + $g.ProxyEnable + " server=" + $g.ProxyServer + " → " + $(if ($g.ProxyEnable -eq 1 -and $g.ProxyServer -eq $httpBind) { 'OK' } else { 'FAILED' }))
-  Set-PacProxy;      $p = Get-ProxySnapshot
-  Write-Host ("[PAC 模式] enable=" + $p.ProxyEnable + " auto=" + $p.AutoConfigURL + " → " + $(if ($p.AutoConfigURL) { 'OK' } else { 'FAILED' }))
-  Clear-SystemProxy; $c = Get-ProxySnapshot
-  Write-Host ("[清除] enable=" + $c.ProxyEnable + " auto='" + $c.AutoConfigURL + "' → " + $(if ($c.ProxyEnable -eq 0 -and -not $c.AutoConfigURL) { 'OK' } else { 'FAILED' }))
-  Restore-ProxyBackup; $a = Get-ProxySnapshot
-  Write-Host ("[还原] enable=" + $a.ProxyEnable + " server='" + $a.ProxyServer + "' → " + $(if ($a.ProxyEnable -eq $before.ProxyEnable -and $a.ProxyServer -eq $before.ProxyServer -and $a.AutoConfigURL -eq $before.AutoConfigURL) { 'OK' } else { 'FAILED' }))
-  Remove-Item $backupFile -Force -ErrorAction SilentlyContinue
-  Write-Host '=== 结束 ==='
-  exit 0
-}
 
 # ---------------- 单实例（Local\ 命名空间，普通用户可创建） ----------------
 $createdNew = $false
-$mutex = New-Object System.Threading.Mutex($true, 'Local\NuaaVpnTrayV2', [ref]$createdNew)
-if (-not $createdNew) { Write-TrayLog 'another tray instance is running -> exit'; exit 0 }
+$mutex = $null
+if (-not $SelfTest) {
+  $mutex = New-Object System.Threading.Mutex($true, 'Local\NuaaVpnTrayV2', [ref]$createdNew)
+  if (-not $createdNew) { Write-TrayLog 'another tray instance is running -> exit'; exit 0 }
+}
 
 [System.Windows.Forms.Application]::EnableVisualStyles()
 $trayIcon = New-Object System.Windows.Forms.NotifyIcon
 $menu = New-Object System.Windows.Forms.ContextMenuStrip
 $trayIcon.ContextMenuStrip = $menu
-$trayIcon.Visible = $true
+$trayIcon.Visible = -not $SelfTest
 
 $miGlobal = New-Object System.Windows.Forms.ToolStripMenuItem '自动配置系统代理'
 $miPac = New-Object System.Windows.Forms.ToolStripMenuItem 'PAC 模式（仅校内走隧道）'
 $miClear = New-Object System.Windows.Forms.ToolStripMenuItem '清除系统代理'
 $miManual = New-Object System.Windows.Forms.ToolStripMenuItem '不变更系统代理（还原）'
 $sep1 = New-Object System.Windows.Forms.ToolStripSeparator
-$miStart = New-Object System.Windows.Forms.ToolStripMenuItem '启动隧道'
-$miRestart = New-Object System.Windows.Forms.ToolStripMenuItem '重启隧道'
-$miStop = New-Object System.Windows.Forms.ToolStripMenuItem '停止隧道'
+$miStart = New-Object System.Windows.Forms.ToolStripMenuItem '连接'
+$miRestart = New-Object System.Windows.Forms.ToolStripMenuItem '重启（先断开再连接）'
+$miStop = New-Object System.Windows.Forms.ToolStripMenuItem '断开连接'
 $miStatus = New-Object System.Windows.Forms.ToolStripMenuItem '状态：未启动'
 $miStatus.Enabled = $false
 $miProxy = New-Object System.Windows.Forms.ToolStripMenuItem '系统代理：未变更'
 $miProxy.Enabled = $false
 $sep2 = New-Object System.Windows.Forms.ToolStripSeparator
 $miExit = New-Object System.Windows.Forms.ToolStripMenuItem '退出'
+$miDetail = New-Object System.Windows.Forms.ToolStripMenuItem '查看连接详情'
 
-$miGlobal.add_Click({ Set-GlobalProxy })
-$miPac.add_Click({ Set-PacProxy })
-$miClear.add_Click({ Clear-SystemProxy })
-$miManual.add_Click({ Restore-ProxyBackup })
-$miStart.add_Click({ Start-Tunnel })
-$miRestart.add_Click({ Stop-Tunnel; Start-Sleep -Milliseconds 800; Start-Tunnel })
-$miStop.add_Click({ Stop-Tunnel })
+$miGlobal.add_Click({ if ((Get-VpnControls $script:lifecycle).CanSetProxy) { Set-GlobalProxy; Update-Ui | Out-Null } })
+$miPac.add_Click({ if ((Get-VpnControls $script:lifecycle).CanSetProxy) { Set-PacProxy; Update-Ui | Out-Null } })
+$miClear.add_Click({ Clear-SystemProxy; Update-Ui | Out-Null })
+$miManual.add_Click({ Restore-ProxyBackup; Update-Ui | Out-Null })
+$miStart.add_Click({ Invoke-TrayAction 'start' })
+$miRestart.add_Click({ Invoke-TrayAction 'restart' })
+$miStop.add_Click({ Invoke-TrayAction 'stop' })
+$miDetail.add_Click({
+  $message = $miStatus.Text + "`n" + $miProxy.Text + "`nHTTP: $httpBind`nSOCKS5: $socksBind`n"
+  if ($script:lifecycle.LastError) { $message += "`n最近错误：" + $script:lifecycle.LastError }
+  $message += "`n`n就绪仅表示本机端口监听。外部隧道请在持有它的插件/客户端中管理。"
+  [void][System.Windows.Forms.MessageBox]::Show($message, '校内 VPN 连接详情')
+})
 $miExit.add_Click({
-  if ((Get-Mode) -in @('global', 'pac')) { Clear-SystemProxy }
-  Stop-Tunnel
-  Start-Sleep -Milliseconds 300
-  $trayIcon.Visible = $false; $trayIcon.Dispose()
-  Write-TrayLog 'tray exit'
-  [System.Windows.Forms.Application]::Exit()
+  $script:exitPending = $true
+  $miExit.Enabled = $false; $miExit.Text = '正在退出…'
+  Clear-OwnedProxy
+  if ($script:lifecycle.Operation -eq 'stop') {
+    $script:lifecycle.WantRunning = $false; $script:lifecycle.RestartPending = $false
+  } else { Invoke-TrayAction 'stop' }
+  Watchdog
 })
 
-foreach ($item in @($miGlobal, $miPac, $miClear, $miManual, $sep1, $miStart, $miRestart, $miStop, $miStatus, $miProxy, $sep2, $miExit)) { [void]$menu.Items.Add($item) }
+foreach ($item in @($miStart, $miStop, $miRestart, $sep1, $miGlobal, $miPac, $miClear, $miManual, $miStatus, $miProxy, $miDetail, $sep2, $miExit)) { [void]$menu.Items.Add($item) }
 
+$script:lifecycle = New-VpnLifecycle
+$script:worker = $null
+$script:exitPending = $false
 $script:lastState = ''
-$script:failStreak = 0
-$script:lastAutoStart = [datetime]::MinValue
+$script:lastErrorShown = ''
+$script:startTimeoutMs = if ($client.startTimeoutMs) { [Math]::Max(3000, [Math]::Min(180000, [double]$client.startTimeoutMs)) } else { 30000 }
 
 function Update-Ui {
-  $t = Get-Tunnel
-  $mode = Get-Mode
+  $m = $script:lifecycle
+  $controls = Get-VpnControls $m
   $snap = Get-ProxySnapshot
-  if ($t.state -ne $script:lastState) {
-    $trayIcon.Icon = New-StateIcon $t.state
-    $script:lastState = $t.state
+  if ($m.State -ne $script:lastState) {
+    if ($trayIcon.Icon) { $trayIcon.Icon.Dispose() }
+    $trayIcon.Icon = New-StateIcon $m.State
+    Write-TrayLog ("state " + $script:lastState + ' -> ' + $m.State)
+    $script:lastState = $m.State
   }
-  $label = switch ($t.state) { 'ready' { '已连接' } 'starting' { '启动中' } default { '未启动' } }
-  $trayIcon.Text = "校内 VPN · $label · $httpBind"
-  $miStatus.Text = if ($t.pid) { "状态：$label（pid $($t.pid)）" } else { "状态：$label" }
-  $miStart.Enabled = ($t.state -eq 'stopped')
-  $miStop.Enabled = ($t.state -ne 'stopped')
-  $isPac = ($snap.AutoConfigURL -and ($snap.AutoConfigURL -eq $pacUrl -or $snap.AutoConfigURL -like '*nuaa-vpn.pac' -or $snap.AutoConfigURL -like '*/proxy.pac')) -or ($mode -eq 'pac')
-  $isGlobal = ($snap.ProxyEnable -eq 1 -and $snap.ProxyServer -eq $httpBind) -or ($mode -eq 'global')
-  $miPac.Checked = [bool]$isPac
-  $miGlobal.Checked = [bool]($isGlobal -and -not $isPac)
-  $miClear.Checked = (-not $isPac -and -not $isGlobal -and $mode -eq 'clear')
-  $miManual.Checked = ($mode -eq 'manual')
-  if ($isPac) { $miProxy.Text = "系统代理：PAC → " + $snap.AutoConfigURL }
+  $elapsed = if ($m.Operation) { [Math]::Max(0, [int]((Get-Date) - $m.Since).TotalSeconds) } else { 0 }
+  $label = switch ($m.State) {
+    'starting' { "连接中（${elapsed}s）" }
+    'stopping' { if ($m.Operation -eq 'start') { "正在取消，等待当前任务结束（${elapsed}s）" } else { "正在断开（${elapsed}s），请稍候" } }
+    'ready' { '代理就绪（仅端口检查）' }
+    'external' { '外部代理占用，请在原客户端管理' }
+    'retry_wait' { '连接失败，' + [Math]::Max(0, [int]($m.RetryAt - (Get-Date)).TotalSeconds) + ' 秒后重试（失败 ' + $m.Failures + '/3）' }
+    'failed' { if ($m.Observed -in @('ready','starting')) { '操作失败，请先重试断开' } else { '连接失败，已停止自动重试' } }
+    default { '未连接' }
+  }
+  $trayIcon.Text = ('校内 VPN · ' + $label).Substring(0, [Math]::Min(63, ('校内 VPN · ' + $label).Length))
+  $miStatus.Text = '状态：' + $label
+  $miDetail.ToolTipText = $m.LastError
+  $miStart.Enabled = $controls.CanStart -and -not $script:exitPending
+  $miStop.Enabled = $controls.CanStop -and -not $script:exitPending
+  $miRestart.Enabled = $controls.CanRestart -and -not $script:exitPending
+  $miGlobal.Enabled = $controls.CanSetProxy -and -not $script:exitPending
+  $miPac.Enabled = $controls.CanSetProxy -and -not $script:exitPending
+  $miStart.Text = if ($m.State -eq 'starting') { '连接中…' } elseif ($m.State -eq 'failed') { '重试连接' } else { '连接' }
+  $miStop.Text = if ($m.State -eq 'starting') { '取消连接' } elseif ($m.State -eq 'retry_wait') { '取消自动重试' } elseif ($m.State -eq 'stopping') { '正在断开…' } elseif ($m.State -eq 'failed') { '重试断开' } else { '断开连接' }
+  # Registry state, not a stale mode flag, determines which proxy is actually active.
+  $isPac = [bool]($snap.AutoConfigURL -and $snap.AutoConfigURL -in @($script:pacUrlHttp,$pacUrl))
+  $isGlobal = ($snap.ProxyEnable -eq 1 -and $snap.ProxyServer -eq $httpBind)
+  $miPac.Checked = $isPac
+  $miGlobal.Checked = $isGlobal -and -not $isPac
+  $miClear.Checked = ($snap.ProxyEnable -eq 0 -and -not $snap.AutoConfigURL)
+  $miManual.Checked = -not $miClear.Checked -and -not $isPac -and -not $isGlobal
+  if ($isPac) { $miProxy.Text = '系统代理：校园 PAC' }
   elseif ($isGlobal) { $miProxy.Text = "系统代理：全局 → $httpBind" }
-  elseif ($mode -eq 'clear') { $miProxy.Text = '系统代理：已清除' }
-  else { $miProxy.Text = '系统代理：未变更' }
-  return $t
+  elseif ($snap.AutoConfigURL) { $miProxy.Text = '系统代理：其他 PAC（本托盘未接管）' }
+  elseif ($snap.ProxyEnable) { $miProxy.Text = '系统代理：其他程序 → ' + $snap.ProxyServer }
+  else { $miProxy.Text = '系统代理：未启用' }
 }
 
 function Watchdog {
-  $t = Update-Ui
-  $mode = Get-Mode
-  if ($mode -notin @('global', 'pac')) { $script:failStreak = 0; return }
-  if ($t.state -eq 'ready') { $script:failStreak = 0; return }
-  # 代理开着但隧道不在：自动重连（15 秒节流）
-  if (((Get-Date) - $script:lastAutoStart).TotalSeconds -gt 15) {
-    $script:lastAutoStart = Get-Date
-    $script:failStreak++
-    Write-TrayLog ("watchdog: tunnel " + $t.state + ", auto-start attempt " + $script:failStreak)
-    if ($t.state -eq 'stopped') { Start-Tunnel }
+  $now = Get-Date
+  if ($script:worker) {
+    $script:worker.Refresh()
+    $limit = if ($script:lifecycle.Operation -eq 'start') { $script:startTimeoutMs + 15000 } else { 75000 }
+    if (-not $script:worker.HasExited -and ($now - $script:lifecycle.Since).TotalMilliseconds -gt $limit) {
+      # Kill only the worker. Its recorded VPN child is cleaned by a serialized stop.
+      $script:worker.Kill()
+      $script:workerTimedOut = $true
+      $script:lifecycle.WantRunning = $false
+      $script:lifecycle.RestartPending = $false
+      return # Wait for actual worker exit; do not start another operation yet.
+    }
+    if ($script:worker.HasExited) {
+      $script:worker.WaitForExit()
+      $ok = $false; $message = '后台操作异常结束，未收到结果。'
+      try {
+        $r = Get-Content -LiteralPath $script:workerResult -Raw -Encoding UTF8 -ErrorAction Stop | ConvertFrom-Json
+        $ok = [bool]$r.ok -and $script:worker.ExitCode -eq 0
+        $message = [string]$r.message
+      } catch { }
+      if ($script:workerTimedOut) { $ok = $false; $message = '后台操作超时，已取消；不再自动重试。' }
+      Write-TrayLog ("operation=" + $script:lifecycle.Operation + " exit=" + $script:worker.ExitCode + " ok=$ok message=$message")
+      $script:worker.Dispose(); $script:worker = $null
+      Remove-Item -LiteralPath $script:workerResult -Force -ErrorAction SilentlyContinue
+      Complete-VpnOperation $script:lifecycle $ok (Get-Tunnel).state $message $now
+    }
   }
-  if ($script:failStreak -ge 3) {
-    Write-TrayLog 'watchdog: giving up, clearing system proxy to avoid proxy errors'
-    Clear-SystemProxy
-    $script:failStreak = 0
-    try {
-      $trayIcon.BalloonTipTitle = '校内 VPN 已断开'
-      $trayIcon.BalloonTipText = "隧道连续 3 次没能起来，已自动撤销系统代理（浏览器不会卡在代理错误页）。`n右键图标可重试『启动隧道』。"
-      $trayIcon.ShowBalloonTip(8000)
-    } catch { }
+  Observe-VpnLifecycle $script:lifecycle (Get-Tunnel).state $now
+  Start-VpnEffect
+  if ($script:lifecycle.State -eq 'failed' -and $script:lifecycle.LastError -ne $script:lastErrorShown) {
+    $script:lastErrorShown = $script:lifecycle.LastError
+    Clear-OwnedProxy
+    Write-TrayLog ('connection failed: ' + $script:lifecycle.LastError)
+    $trayIcon.BalloonTipTitle = '校内 VPN 连接失败'
+    $trayIcon.BalloonTipText = $script:lifecycle.LastError
+    if (-not $SelfTest) { $trayIcon.ShowBalloonTip(6000) }
+  }
+  Update-Ui
+  if ($script:exitPending -and -not $script:worker -and -not $script:lifecycle.Operation) {
+    if ($script:lifecycle.Observed -in @('ready','starting')) {
+      # Do not silently abandon a live owned engine after a failed stop.
+      $script:exitPending = $false; $miExit.Enabled = $true; $miExit.Text = '退出'
+      Update-Ui
+      return
+    }
+    $timer.Stop()
+    $trayIcon.Visible = $false; $trayIcon.Dispose()
+    Write-TrayLog 'tray exit after operation completion'
+    [System.Windows.Forms.Application]::Exit()
   }
 }
 
-$menu.add_Opening({ Update-Ui | Out-Null })
+if ($SelfTest) {
+  # Real menu handlers/watchdog, with process effects and proxy writes replaced.
+  $script:testActions = @(); $script:testObserved = 'stopped'
+  function Start-VpnEffect {
+    if ($script:lifecycle.Effect) {
+      $script:testActions += $script:lifecycle.Effect
+      $script:lifecycle.Effect = ''
+    }
+  }
+  function Clear-OwnedProxy { }
+  function Get-Tunnel { [pscustomobject]@{ state = $script:testObserved } }
+  function Assert-Ui($Condition, [string]$Message) { if (-not $Condition) { throw $Message } }
+  Update-Ui
+  Assert-Ui ($miStart.Enabled -and -not $miRestart.Enabled -and -not $miGlobal.Enabled) 'Initial controls'
+  $miStart.PerformClick()
+  Assert-Ui ($script:lifecycle.State -eq 'starting' -and -not $miStart.Enabled -and -not $miRestart.Enabled -and $miStop.Enabled) 'Connecting controls'
+  1..100 | ForEach-Object { $miStart.PerformClick(); Watchdog }
+  Assert-Ui (($script:testActions -join ',') -eq 'start') 'Duplicate menu/watchdog dispatch'
+  $miStop.PerformClick()
+  Assert-Ui (-not $script:lifecycle.WantRunning -and $script:lifecycle.State -eq 'stopping') 'Cancel intent'
+  Complete-VpnOperation $script:lifecycle $true 'ready' ''
+  $script:testObserved = 'ready'; Watchdog
+  Assert-Ui (($script:testActions -join ',') -eq 'start,stop') 'Cancel cleanup ordering'
+  Complete-VpnOperation $script:lifecycle $true 'stopped' ''
+  $script:testObserved = 'stopped'; Watchdog
+  Assert-Ui ($miStart.Enabled -and -not $miStop.Enabled) 'Stopped controls'
+  $miStart.PerformClick(); Complete-VpnOperation $script:lifecycle $true 'ready' ''
+  $script:testObserved = 'ready'; Watchdog
+  Assert-Ui ($miGlobal.Enabled -and $miPac.Enabled -and $miRestart.Enabled) 'Ready controls'
+  $miRestart.PerformClick(); $miRestart.PerformClick(); Watchdog
+  Assert-Ui ($script:lifecycle.Operation -eq 'stop' -and $script:testActions[-1] -eq 'stop') 'Restart overlaps stop'
+  Complete-VpnOperation $script:lifecycle $true 'stopped' ''
+  $script:testObserved = 'stopped'; Watchdog
+  Assert-Ui ($script:lifecycle.Operation -eq 'start' -and $script:testActions[-1] -eq 'start') 'Restart did not follow stop'
+  Complete-VpnOperation $script:lifecycle $false 'stopped' 'simulated error'; Watchdog
+  Assert-Ui ($script:lifecycle.State -eq 'retry_wait' -and -not $miStart.Enabled -and $miStop.Enabled -and $miStatus.Text.Contains('秒后重试')) 'Retry countdown controls'
+  $miStop.PerformClick(); Watchdog
+  Assert-Ui ($script:lifecycle.State -eq 'stopped' -and -not $script:lifecycle.WantRunning) 'Cancel retry'
+  $script:testObserved = 'external'; Watchdog
+  Assert-Ui (-not $miStart.Enabled -and -not $miStop.Enabled -and -not $miRestart.Enabled -and -not $miPac.Enabled) 'External controls'
+  $script:testObserved = 'stopped'; Watchdog
+  $miStart.PerformClick()
+  $script:worker = [pscustomobject]@{ HasExited=$false; ExitCode=1; Killed=$false }
+  $script:worker | Add-Member ScriptMethod Refresh { }
+  $script:worker | Add-Member ScriptMethod Kill { $this.Killed=$true; $this.HasExited=$true }
+  $script:worker | Add-Member ScriptMethod WaitForExit { }
+  $script:worker | Add-Member ScriptMethod Dispose { }
+  $mockWorker = $script:worker
+  $script:workerResult = Join-Path $env:TEMP ([guid]::NewGuid().ToString('N') + '.json')
+  $script:lifecycle.Since = (Get-Date).AddMilliseconds(-$script:startTimeoutMs - 20000)
+  $script:testObserved = 'starting'; Watchdog; Watchdog
+  Assert-Ui ($mockWorker.Killed -and $script:lifecycle.Operation -eq 'stop') 'Timed-out worker not cleaned serially'
+  Complete-VpnOperation $script:lifecycle $true 'stopped' ''
+  $script:testObserved = 'stopped'; Watchdog
+  Assert-Ui ($script:lifecycle.State -eq 'failed' -and $script:lifecycle.LastError.Contains('超时') -and $miStart.Enabled) 'Timeout feedback erased'
+  $miStart.PerformClick(); $miExit.PerformClick()
+  Assert-Ui ($script:exitPending -and $script:lifecycle.Operation -eq 'start' -and -not $script:lifecycle.WantRunning) 'Exit abandoned starting worker'
+  Complete-VpnOperation $script:lifecycle $true 'ready' ''
+  $script:testObserved = 'ready'; Watchdog
+  Complete-VpnOperation $script:lifecycle $false 'ready' 'simulated stop failure'; Watchdog
+  Assert-Ui (-not $script:exitPending -and $miExit.Enabled -and $miStop.Enabled -and $script:lifecycle.State -eq 'failed') 'Exit concealed failed stop'
+  $timer = New-Object System.Windows.Forms.Timer
+  $miExit.PerformClick()
+  Complete-VpnOperation $script:lifecycle $true 'stopped' ''
+  $script:testObserved = 'stopped'; Watchdog
+  Assert-Ui ($script:exitPending -and -not $script:lifecycle.Operation) 'Exit did not finish cleanup'
+  $timer.Dispose()
+  Write-Host 'PASS: real menu/watchdog connect, 100 clicks, cancel, restart, retry, external, timeout and exit (mock effects; no VPN/registry writes).'
+  exit 0
+}
 
+$menu.add_Opening({ Update-Ui })
 $timer = New-Object System.Windows.Forms.Timer
-$timer.Interval = 3000
+$timer.Interval = 1000
 $timer.add_Tick({ Watchdog })
 $timer.Start()
-
-Write-TrayLog '--- tray v2 starting ---'
-$t0 = Update-Ui
-Write-TrayLog ("ready: state=" + $t0.state + " http=" + $httpBind + " pac=" + $pacUrl)
-# 托盘启动时若已选择代理模式但隧道没起，自动拉起
-if ((Get-Mode) -in @('global', 'pac') -and $t0.state -eq 'stopped') { Start-Tunnel }
-try {
-  $trayIcon.BalloonTipTitle = '校内 VPN 托盘已启动'
-  $trayIcon.BalloonTipText = "右键图标：自动配置系统代理 / PAC 模式（仅校内走隧道）/ 清除系统代理 / 启停隧道 / 退出。`n隧道由托盘自己托管，不需要打开 PI-Desktop。"
-  $trayIcon.ShowBalloonTip(6000)
-} catch { }
-Write-TrayLog 'message loop entered'
-[System.Windows.Forms.Application]::Run()
+Write-TrayLog '--- tray v3 lifecycle starting ---'
+Observe-VpnLifecycle $script:lifecycle (Get-Tunnel).state
+Update-Ui
+Write-TrayLog ("initial state=" + $script:lifecycle.State + "; no automatic login from persisted proxy mode")
+try { [System.Windows.Forms.Application]::Run() }
+finally {
+  $timer.Dispose()
+  if ($mutex) { $mutex.ReleaseMutex(); $mutex.Dispose() }
+}
