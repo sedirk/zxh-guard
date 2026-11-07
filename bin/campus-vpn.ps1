@@ -7,7 +7,7 @@ param(
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'vpn-runtime.ps1')
 $pluginRoot = Split-Path -Parent $PSScriptRoot
-$configFile = Join-Path $pluginRoot 'config.json'
+$configFile = Resolve-VpnConfigFile $pluginRoot
 $exe = Join-Path $PSScriptRoot 'zju-connect.exe'
 $pidFile = Join-Path $env:TEMP 'nuaa-campus-vpn.json'
 $startMarker = Join-Path $env:TEMP 'nuaa-campus-vpn.starting'

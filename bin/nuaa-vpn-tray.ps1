@@ -13,7 +13,7 @@ $here = $PSScriptRoot
 . (Join-Path $here 'vpn-lifecycle.ps1')
 . (Join-Path $here 'vpn-runtime.ps1')
 $pluginRoot = Split-Path -Parent $here
-$configFile = Join-Path $pluginRoot 'config.json'
+$configFile = Resolve-VpnConfigFile $pluginRoot
 $clientPs1 = Join-Path $here 'campus-vpn.ps1'
 $pidFile = Join-Path $env:TEMP 'nuaa-campus-vpn.json'
 $backupFile = Join-Path $env:TEMP 'nuaa-vpn-proxy-backup.json'
@@ -395,7 +395,9 @@ function Watchdog {
       Complete-VpnOperation $script:lifecycle $ok (Get-Tunnel).state $message $now
     }
   }
-  Observe-VpnLifecycle $script:lifecycle (Get-Tunnel).state $now
+  $tunnel = Get-Tunnel
+  $hint = if ($tunnel.state -in @('starting','stopped')) { Get-VpnFailureHint $tunnel.record } else { '' }
+  Observe-VpnLifecycle $script:lifecycle $tunnel.state $now $hint
   Start-VpnEffect
   if ($script:lifecycle.State -eq 'failed' -and $script:lifecycle.LastError -ne $script:lastErrorShown) {
     $script:lastErrorShown = $script:lifecycle.LastError

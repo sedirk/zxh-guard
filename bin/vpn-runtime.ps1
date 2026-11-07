@@ -1,4 +1,4 @@
-# Shared Windows process/lock helpers. Dot-sourcing this file has no side effects.
+﻿# Shared Windows process/lock helpers. Dot-sourcing this file has no side effects.
 function Enter-VpnActionLock([string]$Name = 'Local\NuaaCampusVpnLifecycle', [int]$TimeoutMs = 0) {
   $m = New-Object System.Threading.Mutex($false, $Name)
   try {
@@ -58,4 +58,43 @@ function Remove-VpnStartMarker([string]$File, [string]$Token) {
       Remove-Item -LiteralPath $File -Force -ErrorAction Stop
     }
   } catch { }
+}
+function Resolve-VpnConfigFile([string]$PluginRoot) {
+  # The package installer replaces the plugin directory and removes config.json.
+  # PI-Desktop keeps a surviving copy in plugins\data\<plugin-id>\config.json.
+  $rootConfig = Join-Path $PluginRoot 'config.json'
+  if (Test-Path -LiteralPath $rootConfig) { return $rootConfig }
+  $pluginsRoot = Split-Path -Parent (Split-Path -Parent $PluginRoot)
+  $dataConfig = Join-Path (Join-Path $pluginsRoot 'data') (Join-Path (Split-Path -Leaf $PluginRoot) 'config.json')
+  if (Test-Path -LiteralPath $dataConfig) { return $dataConfig }
+  return $rootConfig
+}
+function Get-VpnFailureHint([object]$Record) {
+  # Read only the tail of the engine logs. Never expose command-line credentials.
+  if (-not $Record) { return '' }
+  $text = ''
+  foreach ($path in @($Record.stdout, $Record.stderr)) {
+    $file = [string]$path
+    if ([string]::IsNullOrWhiteSpace($file)) { continue }
+    try {
+      if (-not (Test-Path -LiteralPath $file)) { continue }
+      $stream = [IO.File]::Open($file, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
+      try {
+        $length = [int][Math]::Min(8192, $stream.Length)
+        if ($length -gt 0) {
+          [void]$stream.Seek(-$length, [IO.SeekOrigin]::End)
+          $reader = New-Object IO.StreamReader($stream, [Text.Encoding]::UTF8, $true)
+          $text += $reader.ReadToEnd()
+          $reader.Dispose()
+        }
+      } finally { $stream.Dispose() }
+    } catch { }
+  }
+  if ($text -match 'server returned SHUTDOWN|SHUTDOWN \(cmd 0x08\)|服务端.*SHUTDOWN') {
+    return '服务端主动关闭了 VPN 会话（SHUTDOWN）。请确认账号未在手机或另一台电脑登录；不要使用全局代理，改用 PAC 模式后重试。'
+  }
+  if ($text -match 'panic:') {
+    return 'VPN 引擎异常退出（panic）。请查看临时目录中的 nuaa-campus-vpn-*.err.log，并重新连接。'
+  }
+  return ''
 }

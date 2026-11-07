@@ -1,4 +1,4 @@
-# Offline regression tests. No real VPN credentials, campus login or proxy registry writes.
+﻿# Offline regression tests. No real VPN credentials, campus login or proxy registry writes.
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
 . (Join-Path $root 'bin\vpn-lifecycle.ps1')
@@ -82,6 +82,32 @@ Test-Case 'port loss with a live owned process requires cleanup, not another log
   Assert ($m.State -eq 'failed' -and -not (Get-VpnControls $m).CanStart) 'live process allowed duplicate login'
   Assert ((Get-VpnControls $m).CanStop) 'cannot clean up unready process'
 }
+Test-Case 'server shutdown is terminal and actionable' {
+  $m = New-VpnLifecycle; [void](Request-VpnAction $m 'start' $t)
+  Complete-VpnOperation $m $true 'ready' '' $t
+  $message = '服务端主动关闭了 VPN 会话（SHUTDOWN）。请确认账号未在手机或另一台电脑登录；不要使用全局代理，改用 PAC 模式后重试。'
+  Observe-VpnLifecycle $m 'stopped' ($t.AddSeconds(2)) $message
+  Assert ($m.State -eq 'failed' -and -not $m.WantRunning) 'server shutdown was not terminal'
+  Assert ($m.LastError -match 'SHUTDOWN' -and $m.LastError -match 'PAC') 'server shutdown message is not actionable'
+  Observe-VpnLifecycle $m 'stopped' ($t.AddMinutes(5))
+  Assert (-not $m.Operation -and -not $m.WantRunning) 'server shutdown was retried'
+}
+Test-Case 'unready process exposes the shutdown cause instead of an English port error' {
+  $m = New-VpnLifecycle
+  Observe-VpnLifecycle $m 'starting' $t '服务端主动关闭了 VPN 会话（SHUTDOWN）；请先断开。'
+  Assert ($m.State -eq 'failed' -and $m.LastError -match 'SHUTDOWN') 'shutdown cause was lost'
+  Assert (-not (Get-VpnControls $m).CanStart -and (Get-VpnControls $m).CanStop) 'unready process controls are wrong'
+}
+Test-Case 'engine log tail recognizes a server shutdown without credentials' {
+  $dir = Join-Path ([IO.Path]::GetTempPath()) ('vpn-hint-' + [guid]::NewGuid().ToString('N'))
+  New-Item -ItemType Directory -Path $dir | Out-Null
+  try {
+    $out = Join-Path $dir 'engine.out.log'
+    Set-Content -LiteralPath $out -Value '2026/11/07 14:51:03 SendConn: server returned SHUTDOWN (cmd 0x08); session terminated by server' -Encoding UTF8
+    $hint = Get-VpnFailureHint ([pscustomobject]@{ stdout = $out; stderr = '' })
+    Assert ($hint -match 'SHUTDOWN' -and $hint -match 'PAC') 'log hint did not identify SHUTDOWN'
+  } finally { Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue }
+}
 
 Test-Case 'worker timeout remains visible after serialized cleanup' {
   $m = New-VpnLifecycle; [void](Request-VpnAction $m 'start' $t)
@@ -138,7 +164,7 @@ try {
   $runtimeFile = Join-Path $bin 'vpn-runtime.ps1'
   $runtimeText = [IO.File]::ReadAllText($runtimeFile)
   Assert ($runtimeText.Contains('Local\NuaaCampusVpnLifecycle')) 'mutex test substitution target missing'
-  [IO.File]::WriteAllText($runtimeFile, $runtimeText.Replace('Local\NuaaCampusVpnLifecycle', $testLock))
+  [IO.File]::WriteAllText($runtimeFile, $runtimeText.Replace('Local\NuaaCampusVpnLifecycle', $testLock), (New-Object System.Text.UTF8Encoding($true)))
   $hp = Free-Port; do { $sp = Free-Port } while ($sp -eq $hp)
   $config = @{studentId='fake user'; password='fake "quoted" end\'; tunnel=@{protocol='easyconnect';server='test.invalid';port=443}; campusClient=@{httpBind="127.0.0.1:$hp";socksBind="127.0.0.1:$sp";startTimeoutMs=8000;domains=@('test.invalid')}}
   Write-VpnJson (Join-Path $temp 'config.json') $config

@@ -1,4 +1,4 @@
-# Pure lifecycle reducer. No process, registry, network or UI side effects.
+﻿# Pure lifecycle reducer. No process, registry, network or UI side effects.
 function New-VpnLifecycle {
   [pscustomobject]@{
     State = 'stopped'; Observed = 'stopped'; WantRunning = $false
@@ -45,6 +45,11 @@ function Set-VpnFailure($Model, [string]$Message, [datetime]$Now) {
   $Model.LastError = $Message
   $Model.Failures++
   $Model.ReadySince = [datetime]::MinValue
+  # A server-initiated SHUTDOWN is terminal: retrying immediately can lock the account.
+  if ($Message -match 'SHUTDOWN|服务端.*关闭') {
+    $Model.State = 'failed'; $Model.WantRunning = $false
+    return
+  }
   if ($Model.WantRunning -and $Model.Failures -lt 3 -and $Model.Observed -eq 'stopped') {
     $Model.State = 'retry_wait'; $Model.RetryAt = $Now.AddSeconds(15)
   } else { $Model.State = 'failed'; $Model.WantRunning = $false }
@@ -85,7 +90,7 @@ function Complete-VpnOperation($Model, [bool]$Success, [string]$Observed, [strin
     }
   }
 }
-function Observe-VpnLifecycle($Model, [string]$Observed, [datetime]$Now = (Get-Date)) {
+function Observe-VpnLifecycle($Model, [string]$Observed, [datetime]$Now = (Get-Date), [string]$Message = '') {
   $Model.Observed = $Observed
   if ($Model.Operation) { return }
   if ($Observed -eq 'external') {
@@ -102,11 +107,12 @@ function Observe-VpnLifecycle($Model, [string]$Observed, [datetime]$Now = (Get-D
   }
   if ($Observed -eq 'starting') {
     $Model.State = 'failed'; $Model.WantRunning = $false
-    $Model.LastError = 'VPN process exists but proxy is not ready. Stop it before retrying.'
+    $Model.LastError = if ($Message) { $Message } else { 'VPN 进程仍在退出或代理端口尚未就绪；请先断开，再重试。' }
     return
   }
   if ($Model.State -eq 'ready' -and $Model.WantRunning) {
-    Set-VpnFailure $Model 'VPN process exited or proxy listener disappeared.' $Now
+    $failure = if ($Message) { $Message } else { 'VPN process exited or proxy listener disappeared.' }
+    Set-VpnFailure $Model $failure $Now
   } elseif ($Model.State -in @('ready','external')) {
     $Model.State = 'stopped'
   }
