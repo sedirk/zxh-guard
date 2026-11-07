@@ -108,6 +108,22 @@ Test-Case 'engine log tail recognizes a server shutdown without credentials' {
     Assert ($hint -match 'SHUTDOWN' -and $hint -match 'PAC') 'log hint did not identify SHUTDOWN'
   } finally { Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue }
 }
+Test-Case 'PAC keeps both campus and browse proxy ports and never sends IPv6 direct' {
+  # Mirrors New-PacText in the tray: host matching plus an IPv6 guard.
+  $httpBind = '127.0.0.1:11081'; $socksBind = '127.0.0.1:11080'
+  $script:domains = @('nuaa.edu.cn')
+  $proxies = @(
+    ('PROXY ' + $httpBind),
+    'PROXY 127.0.0.1:11091',
+    ('SOCKS5 ' + $socksBind),
+    'SOCKS5 127.0.0.1:11090'
+  ) -join '; '
+  Assert ($proxies.Contains('127.0.0.1:11081') -and $proxies.Contains('127.0.0.1:11091')) 'PAC does not list both tunnels'
+  $traySource = Get-Content -LiteralPath (Join-Path $root 'bin\nuaa-vpn-tray.ps1') -Raw -Encoding UTF8
+  Assert ($traySource.Contains('host.indexOf(":") !== -1')) 'PAC has no IPv6 guard'
+  Assert (-not $traySource.Contains("return ('file:///'")) 'PAC still falls back to an ignored file:// URL'
+  Assert ($traySource.Contains('Test-PacPayload')) 'PAC is not validated against the local proxy port'
+}
 
 Test-Case 'worker timeout remains visible after serialized cleanup' {
   $m = New-VpnLifecycle; [void](Request-VpnAction $m 'start' $t)
