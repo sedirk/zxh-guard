@@ -18,12 +18,14 @@ const { scrubProxyEnv, detectSangforInterface } = require('./lib/net-isolate');
 const { TunnelManager } = require('./lib/tunnel');
 const { createGateway } = require('./lib/gateway');
 const transport = require('./lib/transport');
+const configAdmin = require('./lib/config-admin');
 
 const SERVICE_ID = 'zhixiaohang-gateway';
 const COMMANDS = {
   status: 'zhixiaohang.status',
   probe: 'zhixiaohang.probe',
   providerConfig: 'zhixiaohang.provider-config',
+  config: 'zhixiaohang.config',
   tunnelStop: 'zhixiaohang.tunnel-stop',
   vpnStart: 'zhixiaohang.campus-vpn-start',
   vpnStop: 'zhixiaohang.campus-vpn-stop',
@@ -69,8 +71,8 @@ function writeStatusFile() {
     );
   } catch { /* ignore */ }
 }
-
 function reloadConfig() {
+  try { configAdmin.migrateLegacy({ packageRoot, dataPath }); } catch { /* 迁移失败不阻塞启动 */ }
   config = loadConfig({ packageRoot, dataPath, logger: log });
   for (const warning of config.warnings) log(`config: ${warning}`);
   return config;
@@ -246,6 +248,17 @@ function stopService() {
   browseTunnel = null;
   writeStatusFile();
 }
+async function restartService() {
+  const activeTunnel = tunnel;
+  const activeBrowse = browseTunnel;
+  if (gateway) { gateway.close(); gateway = null; }
+  tunnel = null;
+  browseTunnel = null;
+  if (activeBrowse) { try { await activeBrowse.stop('config reload'); } catch { /* ignore */ } }
+  if (activeTunnel) { try { await activeTunnel.stop('config reload'); } catch { /* ignore */ } }
+  return startService();
+}
+
 
 // --------------------------------------------------------------------------
 // 命令
@@ -404,6 +417,20 @@ function registerCommands() {
       await toast('智小航: 私有隧道已关闭（下一次校外请求会自动重新拉起）', 'info');
     },
   });
+
+  pi.commands.register({
+    id: COMMANDS.config,
+    title: '智小航: 打开配置面板',
+    category: 'AI',
+    keywords: ['zhixiaohang', '智小航', '配置', 'config', '设置', '密码', 'api key'],
+    run: async () => {
+      if (!pi.ui || typeof pi.ui.openPanel !== 'function') {
+        await toast('智小航: 当前宿主不支持面板', 'warning');
+        return;
+      }
+      await pi.ui.openPanel({ title: '智小航 · 配置' });
+    },
+  });
 }
 
 function unregisterCommands() {
@@ -416,7 +443,44 @@ function unregisterCommands() {
 // 生命周期
 // --------------------------------------------------------------------------
 
+async function onPanelInvoke(channel, payload) {
+  if (channel === 'config:read') {
+    return configAdmin.readPanel({ packageRoot, dataPath, load: () => config });
+  }
+  if (channel === 'config:write') {
+    const result = configAdmin.savePanel({ packageRoot, dataPath }, payload || {});
+    if (!result.ok) return result;
+    reloadConfig();
+    if (!gateway) return { ...result, restarted: false };
+    try {
+      const started = await restartService();
+      log(`配置面板已保存：${result.changed.join(', ') || '(无变化)'} · 网关重启于端口 ${started.port}`);
+      return { ...result, restarted: true, port: started.port };
+    } catch (error) {
+      const message = String((error && error.message) || error).slice(0, 200);
+      log(`配置已保存，但网关重启失败：${message}`);
+      return { ...result, restarted: false, restartError: message };
+    }
+  }
+  if (channel === 'gateway:status') {
+    if (!gateway) return { running: false };
+    const snap = gateway.statusSnapshot();
+    return {
+      running: true,
+      port: snap.port,
+      rpm: snap.rateLimit.rpm,
+      lastRoute: snap.lastRoute,
+      lastError: snap.lastError,
+      apiKeyPresent: snap.apiKeyPresent,
+      credentialsPresent: snap.credentialsPresent,
+      tunnel: { state: snap.tunnel ? snap.tunnel.state : 'unknown', pid: snap.tunnel ? snap.tunnel.pid : null },
+    };
+  }
+  throw Object.assign(new Error(`未知的面板通道: ${channel}`), { code: 'UNSUPPORTED' });
+}
+
 module.exports = {
+  onPanelInvoke,
   async onLoad() {
     pi = globalThis.pi;
     if (!pi) throw new Error('宿主 plugin API 不可用：onLoad 之前应当存在全局 pi');

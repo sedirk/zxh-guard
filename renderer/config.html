@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="pi-plugin-chrome" content="v2">
+<title>智小航 · 配置</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    padding: calc(var(--pi-plugin-titlebar-height, 0px) + 18px) 22px 22px;
+    font: 13px/1.55 "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+    background: #1b1b1d; color: #e6e6e8;
+  }
+  h1 { font-size: 15px; margin: 0 0 2px; font-weight: 600; }
+  .sub { color: #8f8f96; font-size: 12px; margin-bottom: 16px; }
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px 16px; }
+  .field { display: flex; flex-direction: column; gap: 5px; }
+  .field.wide { grid-column: 1 / -1; }
+  label { font-size: 12px; color: #a9a9b0; }
+  input[type="text"], input[type="password"], input[type="number"] {
+    background: #232326; border: 1px solid #35353a; border-radius: 7px;
+    color: #e6e6e8; padding: 7px 9px; font: inherit; outline: none;
+  }
+  input:focus { border-color: #4c7dff; }
+  .hint { font-size: 11px; color: #7c7c84; }
+  .actions { display: flex; gap: 8px; align-items: center; margin-top: 18px; flex-wrap: wrap; }
+  button {
+    border: 1px solid #35353a; background: #26262a; color: #e6e6e8;
+    border-radius: 7px; padding: 7px 14px; font: inherit; cursor: pointer;
+  }
+  button.primary { background: #2f6bff; border-color: #2f6bff; color: #fff; font-weight: 600; }
+  button:disabled { opacity: .5; cursor: default; }
+  .status { margin-top: 14px; font-size: 12px; white-space: pre-wrap; }
+  .status.ok { color: #6bd48a; }
+  .status.err { color: #ff8a80; }
+  .path { margin-top: 16px; padding-top: 12px; border-top: 1px solid #2c2c31; font-size: 11px; color: #7c7c84; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  code { background: #232326; padding: 2px 6px; border-radius: 4px; color: #b9b9c0; word-break: break-all; }
+</style>
+</head>
+<body>
+  <h1>南航智小航 · 配置</h1>
+  <div class="sub">保存后网关会按新配置重启。空白的密码 / API Key 表示保持原值不变。</div>
+
+  <form id="form" class="grid" autocomplete="off">
+    <div class="field">
+      <label for="studentId">学号</label>
+      <input id="studentId" type="text" placeholder="例如 2023000000">
+    </div>
+    <div class="field">
+      <label for="password">校园网密码</label>
+      <input id="password" type="password" placeholder="留空则不修改">
+      <span class="hint" id="passwordHint"></span>
+    </div>
+    <div class="field wide">
+      <label for="apiKey">智小航 API Key</label>
+      <input id="apiKey" type="password" placeholder="留空则不修改">
+      <span class="hint" id="apiKeyHint"></span>
+    </div>
+    <div class="field wide">
+      <label for="baseUrl">接口地址</label>
+      <input id="baseUrl" type="text" placeholder="https://token.nuaa.edu.cn/v1">
+    </div>
+    <div class="field">
+      <label for="gatewayPort">网关端口</label>
+      <input id="gatewayPort" type="number" min="1024" max="65535">
+      <span class="hint">PI-Desktop 里填 http://127.0.0.1:端口/v1</span>
+    </div>
+    <div class="field">
+      <label for="rpm">限流（每分钟请求数）</label>
+      <input id="rpm" type="number" min="1" max="10000">
+    </div>
+    <div class="field">
+      <label for="httpBind">隧道 HTTP 代理</label>
+      <input id="httpBind" type="text" placeholder="127.0.0.1:11081">
+    </div>
+    <div class="field">
+      <label for="socksBind">隧道 SOCKS5 代理</label>
+      <input id="socksBind" type="text" placeholder="127.0.0.1:11080">
+    </div>
+    <div class="field">
+      <label for="idleMinutes">闲置自动关闭（分钟）</label>
+      <input id="idleMinutes" type="number" min="1" max="1440">
+    </div>
+    <div class="field">
+      <label for="startSeconds">隧道启动超时（秒）</label>
+      <input id="startSeconds" type="number" min="3" max="180">
+    </div>
+    <div class="field wide">
+      <label for="proxyDomains">隧道强制代理的域名（逗号分隔，留空=仅接口地址的主机）</label>
+      <input id="proxyDomains" type="text" placeholder="token.nuaa.edu.cn">
+    </div>
+    <div class="field wide">
+      <label for="tunnelEnabled">按需启动私有隧道</label>
+      <select id="tunnelEnabled" style="background:#232326;border:1px solid #35353a;border-radius:7px;color:#e6e6e8;padding:7px 9px;font:inherit">
+        <option value="true">开启（校外自动启动 VPN）</option>
+        <option value="false">关闭（只在校园网内直连）</option>
+      </select>
+    </div>
+  </form>
+
+  <div class="actions">
+    <button class="primary" id="save" type="button">保存并重启网关</button>
+    <button id="reload" type="button">重新读取</button>
+    <button id="status" type="button">查看网关状态</button>
+  </div>
+
+  <div class="status" id="msg"></div>
+  <div class="path">
+    <span>配置文件：</span><code id="file">（读取中）</code>
+    <button id="copy" type="button" style="padding:2px 8px;font-size:11px">复制路径</button>
+  </div>
+
+<script>
+(function () {
+  const bridge = window.pluginBridge;
+  const ids = ['studentId', 'password', 'apiKey', 'baseUrl', 'gatewayPort', 'rpm',
+    'httpBind', 'socksBind', 'idleMinutes', 'startSeconds', 'proxyDomains', 'tunnelEnabled'];
+  const $ = (id) => document.getElementById(id);
+  const msg = $('msg');
+
+  function show(text, kind) {
+    msg.textContent = text || '';
+    msg.className = 'status' + (kind ? ' ' + kind : '');
+  }
+
+  function call(channel, payload) {
+    if (!bridge || typeof bridge.invoke !== 'function') {
+      return Promise.reject(new Error('当前环境没有 pluginBridge，请在插件面板中打开'));
+    }
+    return payload === undefined ? bridge.invoke(channel) : bridge.invoke(channel, payload);
+  }
+
+  async function load() {
+    show('正在读取配置…');
+    try {
+      const view = await call('config:read');
+      for (const id of ids) {
+        if (id === 'password' || id === 'apiKey') { $(id).value = ''; continue; }
+        if (id === 'tunnelEnabled') { $(id).value = view.tunnelEnabled ? 'true' : 'false'; continue; }
+        $(id).value = view[id] === undefined || view[id] === null ? '' : view[id];
+      }
+      $('file').textContent = view.file + (view.exists ? '' : '（尚未创建）');
+      $('passwordHint').textContent = view.hasPassword ? '已设置，留空则不修改' : '尚未设置';
+      $('apiKeyHint').textContent = view.hasApiKey ? '已设置，留空则不修改' : '尚未设置';
+      const warn = (view.warnings || []).filter(Boolean);
+      show(warn.length ? '已读取。注意：\n' + warn.join('\n') : '已读取配置。', warn.length ? '' : 'ok');
+    } catch (error) {
+      show('读取失败：' + (error && error.message ? error.message : error), 'err');
+    }
+  }
+
+  function collect() {
+    const payload = {};
+    for (const id of ids) {
+      const el = $(id);
+      if (id === 'password' || id === 'apiKey') {
+        if (el.value !== '') payload[id] = el.value;
+        continue;
+      }
+      if (id === 'tunnelEnabled') { payload[id] = el.value === 'true'; continue; }
+      if (el.value === '') continue;
+      payload[id] = el.value;
+    }
+    return payload;
+  }
+
+  async function save() {
+    const button = $('save');
+    button.disabled = true;
+    show('正在保存…');
+    try {
+      const result = await call('config:write', collect());
+      if (!result || result.ok !== true) {
+        show('保存失败：\n' + ((result && result.errors) || ['未知错误']).join('\n'), 'err');
+        return;
+      }
+      const lines = ['已保存到 ' + result.file];
+      if (result.changed && result.changed.length) lines.push('修改项：' + result.changed.join(', '));
+      if (result.port) lines.push('网关已重启，监听端口 ' + result.port);
+      if (result.restartError) lines.push('重启失败：' + result.restartError);
+      show(lines.join('\n'), result.restartError ? 'err' : 'ok');
+      await load().catch(function () {});
+    } catch (error) {
+      show('保存失败：' + (error && error.message ? error.message : error), 'err');
+    } finally {
+      button.disabled = false;
+    }
+  }
+
+  async function status() {
+    show('正在查询…');
+    try {
+      const snap = await call('gateway:status');
+      if (!snap || snap.running !== true) { show('网关未运行', 'err'); return; }
+      const t = snap.tunnel || {};
+      show([
+        '网关 127.0.0.1:' + snap.port + ' · 限流 ' + snap.rpm + ' RPM',
+        '隧道 ' + (t.state || '未知') + (t.pid ? ' (pid ' + t.pid + ')' : ''),
+        '最近路由 ' + (snap.lastRoute || '未判定'),
+        snap.lastError ? '最近错误 ' + String(snap.lastError).slice(0, 160) : '最近无错误',
+        snap.apiKeyPresent ? '' : 'API Key 未填写',
+        snap.credentialsPresent ? '' : '学号/密码未填写',
+      ].filter(Boolean).join('\n'), 'ok');
+    } catch (error) {
+      show('查询失败：' + (error && error.message ? error.message : error), 'err');
+    }
+  }
+
+  $('save').addEventListener('click', save);
+  $('reload').addEventListener('click', load);
+  $('status').addEventListener('click', status);
+  $('copy').addEventListener('click', async function () {
+    const text = $('file').textContent || '';
+    try {
+      if (bridge && bridge.clipboard && typeof bridge.clipboard.writeText === 'function') {
+        await bridge.clipboard.writeText(text);
+        show('路径已复制', 'ok');
+      } else {
+        show('剪贴板不可用，请手动选择路径：' + text, 'err');
+      }
+    } catch (error) {
+      show('复制失败：' + (error && error.message ? error.message : error), 'err');
+    }
+  });
+
+  load();
+})();
+</script>
+</body>
+</html>

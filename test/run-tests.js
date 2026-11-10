@@ -69,6 +69,17 @@ function createFakeUpstream() {
         res.end(JSON.stringify({ data: [{ id: 'zhixiaohang-test-model', context_length: 65536 }] }));
         return;
       }
+      const failure = /^\/v1\/upstream-(500|502|503|504)-(html|text-html|json-html|json|sse)$/.exec(key);
+      if (failure) {
+        const status = Number(failure[1]);
+        const kind = failure[2];
+        const page = `<html><head><title>${status} Bad Gateway</title></head><body>PRIVATE_PAGE_MARKER</body></html>`;
+        const types = { html: 'text/html', 'text-html': 'text/plain', 'json-html': 'application/json', json: 'application/json', sse: 'text/event-stream' };
+        res.writeHead(status, { 'content-type': types[kind] });
+        res.end(kind === 'json' ? JSON.stringify({ error: { code: 'upstream_test', message: 'backend unavailable' } })
+          : kind === 'json-html' ? JSON.stringify({ error: { message: page } }) : page);
+        return;
+      }
       if (key === '/v1/loginpage') {
         res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
         res.end(loginHtml);
@@ -79,9 +90,9 @@ function createFakeUpstream() {
         res.end(JSON.stringify({ error: { message: loginHtml } }));
         return;
       }
-      if (key === '/v1/busy') {
+      if (key === '/v1/busy' || key === '/v1/busy-503') {
         if (n === 1) {
-          res.writeHead(429, { 'content-type': 'application/json' });
+          res.writeHead(key === '/v1/busy-503' ? 503 : 429, { 'content-type': 'application/json' });
           res.end(JSON.stringify({
             message: 'All upstream providers are cooling down. Please retry after 1 seconds.',
             type: 'upstream_capacity_exhausted',
@@ -185,6 +196,8 @@ async function main() {
     assert.strictEqual(res.status, 502);
     const payload = JSON.parse(res.text);
     assert.strictEqual(payload.error.code, 'ZHIXIAOHANG_OFF_CAMPUS');
+    assert.strictEqual(payload.error.upstreamStatus, 200);
+    assert.strictEqual(payload.error.route, 'direct');
     assert.ok(payload.error.message.includes('智小航'), '提示应含产品名');
     assert.ok(payload.error.message.length < 260, `提示应很短，实际 ${payload.error.message.length}`);
     assert.ok(!/<html|base64|iVBOR/i.test(res.text), '不得透传 HTML/base64');
@@ -203,6 +216,70 @@ async function main() {
     assert.ok(!/统一身份认证<\/|base64/.test(res.text));
     gateway.close();
     fake.server.close();
+  });
+
+  await suite('sanitize: 上游 5xx 页面不误报密码、不透传页面、不强制重登', async () => {
+    const fake = await createFakeUpstream();
+    try {
+      for (const route of ['direct', 'tunnel']) {
+        const cfg = baseConfig({ baseUrl: `http://127.0.0.1:${fake.port}/v1`, probe: { timeoutMs: 3000, cacheMs: 60000 } });
+        cfg.tunnel.enabled = true;
+        cfg.vpnInterface.bindEnabled = false;
+        let starts = 0;
+        const tunnel = { ...stubTunnel(true), ensureReady: async () => { starts += 1; return true; } };
+        const logs = [];
+        const gateway = createGateway({ getConfig: () => cfg, log: (line) => logs.push(line), tunnel });
+        await gateway.listen([0]);
+        gateway.setRouteCache({ at: Date.now(), route: { kind: route, agent: null } });
+        try {
+          for (const [status, kind] of [[502, 'html'], [503, 'html'], [504, 'text-html'], [500, 'json-html'], [503, 'json-html'], [502, 'sse']]) {
+            const endpoint = `/v1/upstream-${status}-${kind}`;
+            const before = fake.hits.get(endpoint) || 0;
+            const response = await request(gateway.stats.port, { path: endpoint, body: {} });
+            assert.strictEqual(response.status, status);
+            const payload = JSON.parse(response.text);
+            assert.strictEqual(payload.error.code, 'ZHIXIAOHANG_UPSTREAM_ERROR', `${route} ${endpoint}`);
+            assert.strictEqual(payload.error.upstreamStatus, status);
+            assert.strictEqual(payload.error.route, route);
+            assert.strictEqual(payload.error.reason, 'upstream-http-error');
+            assert.ok(payload.error.message.includes(`HTTP ${status}`));
+            assert.ok(!/检查学号密码|PRIVATE_PAGE_MARKER|<html|base64/.test(response.text));
+            assert.strictEqual(fake.hits.get(endpoint), before + 1, '5xx 页面不得触发重复请求');
+            assert.ok(gateway.statusSnapshot().lastError.includes(`HTTP ${status} via ${route}`));
+          }
+          assert.strictEqual(starts, 0, '上游 5xx 不应触发重新登录 VPN');
+          assert.ok(logs.every((line) => !line.includes('PRIVATE_PAGE_MARKER')));
+        } finally { gateway.close(); }
+      }
+    } finally { fake.server.close(); }
+  });
+
+  await suite('转发: 上游 5xx JSON 错误保留原状', async () => {
+    const fake = await createFakeUpstream();
+    const cfg = baseConfig({ baseUrl: `http://127.0.0.1:${fake.port}/v1` });
+    const gateway = createGateway({ getConfig: () => cfg, log: () => {}, tunnel: stubTunnel(false) });
+    try {
+      await gateway.listen([0]);
+      for (const status of [500, 502, 503, 504]) {
+        const response = await request(gateway.stats.port, { path: `/v1/upstream-${status}-json`, body: {} });
+        assert.strictEqual(response.status, status);
+        assert.deepStrictEqual(JSON.parse(response.text), { error: { code: 'upstream_test', message: 'backend unavailable' } });
+      }
+      assert.strictEqual(gateway.stats.sanitized, 0);
+    } finally { gateway.close(); fake.server.close(); }
+  });
+
+  await suite('retry: 503 JSON 容量提示仍按提示重试', async () => {
+    const fake = await createFakeUpstream();
+    const cfg = baseConfig({ baseUrl: `http://127.0.0.1:${fake.port}/v1` });
+    const gateway = createGateway({ getConfig: () => cfg, log: () => {}, tunnel: stubTunnel(false) });
+    try {
+      await gateway.listen([0]);
+      const response = await request(gateway.stats.port, { path: '/v1/busy-503', body: {} });
+      assert.strictEqual(response.status, 200);
+      assert.strictEqual(fake.hits.get('/v1/busy-503'), 2);
+      assert.strictEqual(gateway.stats.retries429, 1);
+    } finally { gateway.close(); fake.server.close(); }
   });
 
   await suite('转发: chat/completions 与 responses 都通，且注入 Authorization', async () => {
@@ -370,6 +447,74 @@ async function main() {
     assert.ok(cfg2.warnings.some((w) => w.includes('apiKey')));
     assert.ok(cfg2.warnings.some((w) => w.includes('studentId')));
   });
+  await suite('配置面板: 读值脱敏，保存保留未知字段且拒绝非法值', async () => {
+    const admin = require(path.join(root, 'lib/config-admin.js'));
+    const dir = tempDir('admin');
+    const file = path.join(dir, 'config.json');
+    fs.writeFileSync(file, JSON.stringify({
+      studentId: 'S1',
+      password: 'secret-pw',
+      apiKey: 'secret-key',
+      custom: { keep: true },
+      unknownTop: 42,
+    }, null, 2), 'utf8');
+
+    const view = admin.readPanel({ packageRoot: dir });
+    assert.strictEqual(view.file, file);
+    assert.strictEqual(view.exists, true);
+    assert.strictEqual(view.hasPassword, true);
+    assert.strictEqual(view.hasApiKey, true);
+    const text = JSON.stringify(view);
+    assert.ok(!text.includes('secret-pw'), '面板返回值不得含密码明文');
+    assert.ok(!text.includes('secret-key'), '面板返回值不得含 API Key 明文');
+
+    const rejected = admin.savePanel({ packageRoot: dir }, { gatewayPort: 'abc', httpBind: '0.0.0.0:11081' });
+    assert.strictEqual(rejected.ok, false);
+    assert.strictEqual(rejected.errors.length, 2);
+    assert.strictEqual(JSON.parse(fs.readFileSync(file, 'utf8')).gatewayPort, undefined, '校验失败不得落盘');
+
+    const saved = admin.savePanel({ packageRoot: dir }, { gatewayPort: '41999', password: '', apiKey: 'new-key', rpm: 12 });
+    assert.strictEqual(saved.ok, true);
+    assert.deepStrictEqual(saved.changed.sort(), ['apiKey', 'gatewayPort', 'rateLimit']);
+    const after = JSON.parse(fs.readFileSync(file, 'utf8'));
+    assert.strictEqual(after.gatewayPort, 41999);
+    assert.strictEqual(after.apiKey, 'new-key');
+    assert.strictEqual(after.password, 'secret-pw', '空白密码必须保持原值');
+    assert.deepStrictEqual(after.custom, { keep: true }, '未知字段必须保留');
+    assert.strictEqual(after.unknownTop, 42, '未知顶层字段必须保留');
+    assert.strictEqual(after.rateLimit.rpm, 12);
+
+    const dataDir = tempDir('admin-data');
+    fs.writeFileSync(path.join(dataDir, 'config.json'), '{"studentId":"FROM_DATA"}', 'utf8');
+    assert.strictEqual(admin.resolveTarget({ packageRoot: dir, dataPath: dataDir }).file, path.join(dataDir, 'config.json'), '数据目录优先');
+    assert.strictEqual(admin.readPanel({ packageRoot: dir, dataPath: dataDir }).studentId, 'FROM_DATA');
+  });
+
+  await suite('配置面板: main.js 暴露 onPanelInvoke 且命令已注册', async () => {
+    const plugin = require(path.join(root, 'main.js'));
+    assert.strictEqual(typeof plugin.onPanelInvoke, 'function');
+    const manifest = JSON.parse(fs.readFileSync(path.join(root, 'manifest.json'), 'utf8'));
+    assert.ok(manifest.permissions.includes('ui.panel'));
+    assert.strictEqual(manifest.ui.panel, 'renderer/config.html');
+    assert.ok(fs.existsSync(path.join(root, 'renderer', 'config.html')));
+  });
+
+  await suite('配置面板: 只认数据目录一份配置，旧文件仅迁移一次', async () => {
+    const admin = require(path.join(root, 'lib/config-admin.js'));
+    const base = tempDir('single-root');
+    const dataDir = tempDir('single-data');
+    fs.writeFileSync(path.join(base, 'config.json'), JSON.stringify({ gatewayPort: 41000 }), 'utf8');
+    assert.strictEqual(admin.migrateLegacy({ packageRoot: base, dataPath: dataDir }), path.join(dataDir, 'config.json'));
+    assert.ok(fs.existsSync(path.join(dataDir, 'config.json')));
+    assert.strictEqual(admin.readPanel({ packageRoot: base, dataPath: dataDir }).gatewayPort, 41000);
+    fs.writeFileSync(path.join(base, 'config.json'), JSON.stringify({ gatewayPort: 49999 }), 'utf8');
+    assert.strictEqual(admin.readPanel({ packageRoot: base, dataPath: dataDir }).gatewayPort, 41000, '迁移后根目录文件不再生效');
+    const saved = admin.savePanel({ packageRoot: base, dataPath: dataDir }, { gatewayPort: '42001' });
+    assert.strictEqual(saved.ok, true);
+    assert.strictEqual(saved.file, path.join(dataDir, 'config.json'));
+    assert.strictEqual(JSON.parse(fs.readFileSync(path.join(dataDir, 'config.json'), 'utf8')).gatewayPort, 42001);
+  });
+
 
   await suite('兼容服务: 生成可编辑配置，端口正确且不泄露凭据', async () => {
     const plugin = require(path.join(root, 'main.js'));
@@ -624,7 +769,7 @@ async function main() {
     await plugin.onLoad();
     assert.strictEqual(registered.services.length, 1, '必须注册 background service');
     assert.strictEqual(registered.services[0].id, 'zhixiaohang-gateway');
-    assert.deepStrictEqual(registered.commands.map((cmd) => cmd.id).sort(), ['zhixiaohang.campus-vpn-start', 'zhixiaohang.campus-vpn-stop', 'zhixiaohang.probe', 'zhixiaohang.provider-config', 'zhixiaohang.status', 'zhixiaohang.tunnel-stop']);
+    assert.deepStrictEqual(registered.commands.map((cmd) => cmd.id).sort(), ['zhixiaohang.campus-vpn-start', 'zhixiaohang.campus-vpn-stop', 'zhixiaohang.config', 'zhixiaohang.probe', 'zhixiaohang.provider-config', 'zhixiaohang.status', 'zhixiaohang.tunnel-stop']);
     assert.strictEqual(process.env.HTTPS_PROXY, undefined, 'onLoad 必须清掉代理变量');
     assert.strictEqual(process.env.ALL_PROXY, undefined);
 
@@ -670,7 +815,7 @@ async function main() {
     globalThis.pi.clipboard = savedClipboard;
 
     const status = registered.commands.length;
-    assert.strictEqual(status, 6);
+    assert.strictEqual(status, 7);
 
     await plugin.onUnload();
     assert.strictEqual(registered.commands.length, 0, '卸载后命令应被注销');
