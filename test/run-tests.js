@@ -282,6 +282,41 @@ async function main() {
     } finally { gateway.close(); fake.server.close(); }
   });
 
+  await suite('observability: /health 与 requests.jsonl 记录最近一轮', async () => {
+    const fake = await createFakeUpstream();
+    const cfg = baseConfig({ baseUrl: `http://127.0.0.1:${fake.port}/v1` });
+    const dataPath = fs.mkdtempSync(path.join(os.tmpdir(), 'zxh-health-'));
+    const gateway = createGateway({ getConfig: () => cfg, log: () => {}, tunnel: stubTunnel(false), dataPath });
+    await gateway.listen([0]);
+
+    const before = JSON.parse((await request(gateway.stats.port, { path: '/health', method: 'GET' })).text);
+    assert.strictEqual(before.lastRequest, null, '还没有请求时 lastRequest 应为 null');
+    assert.strictEqual(before.plugin, 'local.zhixiaohang-guard');
+
+    const ok = await request(gateway.stats.port, {
+      path: '/v1/chat/completions',
+      body: { model: 'm', messages: [{ role: 'user', content: 'hi' }] },
+      headers: { authorization: `Bearer ${cfg.apiKey}` },
+    });
+    assert.strictEqual(ok.status, 200);
+
+    const after = JSON.parse((await request(gateway.stats.port, { path: '/health', method: 'GET' })).text);
+    assert.ok(after.lastRequest, '/health 应带 lastRequest');
+    assert.strictEqual(after.lastRequest.route, 'direct');
+    assert.strictEqual(after.lastRequest.upstreamStatus, 200);
+    assert.ok(after.lastRequest.ms >= 0);
+    assert.strictEqual(after.lastRequest.path, '/v1/chat/completions');
+
+    const lines = fs.readFileSync(path.join(dataPath, 'requests.jsonl'), 'utf8').trim().split('\n');
+    assert.strictEqual(lines.length, 1, '每次转发写一行');
+    const record = JSON.parse(lines[0]);
+    assert.strictEqual(record.upstreamStatus, 200);
+    assert.strictEqual(record.route, 'direct');
+
+    gateway.close();
+    fake.server.close();
+  });
+
   await suite('转发: chat/completions 与 responses 都通，且注入 Authorization', async () => {
     const fake = await createFakeUpstream();
     const cfg = baseConfig({ baseUrl: `http://127.0.0.1:${fake.port}/v1` });

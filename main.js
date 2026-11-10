@@ -229,6 +229,7 @@ async function startService({ log: providedLog } = {}) {
     log,
     tunnel,
     vpn: { start: startCampusVpn, stop: stopCampusVpn, status: campusVpnStatus, pac: campusVpnPac, stopApiTunnel },
+    dataPath,
   });
 
   const base = config.gatewayPort;

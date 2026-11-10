@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "local.zhixiaohang-guard",
   "name": "南航智小航守护网关",
-  "version": "1.2.0",
+  "version": "1.3.0",
   "description": "南航智小航（https://token.nuaa.edu.cn/v1）专属本地守护网关：彻底无视系统代理（启动即清除 HTTP_PROXY/HTTPS_PROXY/ALL_PROXY 并自建直连 Agent），按需拉起私有 zju-connect EasyConnect 隧道（默认不启动，探测到校外才启动，闲置 20 分钟自动关闭），检测官方 Sangfor 虚拟网卡并用 localAddress 绑定发包，28 RPM 滑动窗口排队限流，校外 HTML/乱码响应拦截净化，429 冷却耐心重试与空流自动重试，同时转发 /v1/chat/completions 与 /v1/responses。",
   "main": "main.js",
   "permissions": [

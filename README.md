@@ -138,6 +138,14 @@ notepad .\config.json
 - 写入保留 `config.json` 里表单未管理的字段。
 - 面板需要 `ui.panel` 权限：从 1.1.5 升级到 1.2.0 时，宿主会要求重新确认一次权限。
 
+### 可观测性（1.3.0 起）
+
+- `GET /health`（与 `/healthz`、`/status`、`/` 等价）返回网关快照：`lastRoute`、`lastProbe`、`lastError`、
+  计数器、隧道状态，以及**最近一轮请求** `lastRequest`
+- `lastRequest` 字段：`at`、`path`、`route`（direct / nic / tunnel）、`upstreamStatus`、`ms`、`aborted`
+- 每次转发都会往插件数据目录的 `requests.jsonl` 追加一行（超过 5MB 自动轮转成 `.1`），
+  排障时不用再翻日志：校外登录页 / 5xx / 隧道故障各是哪一种，一眼能看出来
+
 ### 区分隧道故障与上游服务故障
 
 - 隧道 `ready` 只说明本地代理已启动，不代表校园站点或模型 API 已可用。
