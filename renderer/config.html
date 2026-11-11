@@ -15,15 +15,25 @@
   }
   h1 { font-size: 15px; margin: 0 0 2px; font-weight: 600; }
   .sub { color: #8f8f96; font-size: 12px; margin-bottom: 16px; }
-  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px 16px; }
+  /* 每个分区是一张卡片：标题独占整行，卡片内部自己两列；窄屏自动单列。 */
+  .grid { display: grid; grid-template-columns: 1fr; gap: 14px; }
+  .group {
+    display: grid; grid-template-columns: 1fr 1fr; gap: 12px 18px;
+    border: 1px solid #2c2c31; border-radius: 10px;
+    padding: 14px 16px 16px; background: #1e1e21;
+  }
+  .group > .section {
+    grid-column: 1 / -1; margin: 0; font-size: 12px; font-weight: 600;
+    color: #9c9ca6; letter-spacing: .02em;
+  }
+  @media (max-width: 760px) { .group { grid-template-columns: 1fr; } }
   .field { display: flex; flex-direction: column; gap: 5px; }
   .field.wide { grid-column: 1 / -1; }
-  label { font-size: 12px; color: #a9a9b0; }
-  input[type="text"], input[type="password"], input[type="number"] {
+  select, input[type="text"], input[type="password"], input[type="number"] {
     background: #232326; border: 1px solid #35353a; border-radius: 7px;
     color: #e6e6e8; padding: 7px 9px; font: inherit; outline: none;
   }
-  input:focus { border-color: #4c7dff; }
+  select:focus, input:focus { border-color: #4c7dff; }
   .hint { font-size: 11px; color: #7c7c84; }
   .actions { display: flex; gap: 8px; align-items: center; margin-top: 18px; flex-wrap: wrap; }
   button {
@@ -44,60 +54,73 @@
   <div class="sub">保存后网关会按新配置重启。空白的密码 / API Key 表示保持原值不变。</div>
 
   <form id="form" class="grid" autocomplete="off">
-    <div class="field">
-      <label for="studentId">学号</label>
-      <input id="studentId" type="text" placeholder="例如 2023000000">
-    </div>
-    <div class="field">
-      <label for="password">校园网密码</label>
-      <input id="password" type="password" placeholder="留空则不修改">
-      <span class="hint" id="passwordHint"></span>
-    </div>
-    <div class="field wide">
-      <label for="apiKey">智小航 API Key</label>
-      <input id="apiKey" type="password" placeholder="留空则不修改">
-      <span class="hint" id="apiKeyHint"></span>
-    </div>
-    <div class="field wide">
-      <label for="baseUrl">接口地址</label>
-      <input id="baseUrl" type="text" placeholder="https://token.nuaa.edu.cn/v1">
-    </div>
-    <div class="field">
-      <label for="gatewayPort">网关端口</label>
-      <input id="gatewayPort" type="number" min="1024" max="65535">
-      <span class="hint">PI-Desktop 里填 http://127.0.0.1:端口/v1</span>
-    </div>
-    <div class="field">
-      <label for="rpm">限流（每分钟请求数）</label>
-      <input id="rpm" type="number" min="1" max="10000">
-    </div>
-    <div class="field">
-      <label for="httpBind">隧道 HTTP 代理</label>
-      <input id="httpBind" type="text" placeholder="127.0.0.1:11081">
-    </div>
-    <div class="field">
-      <label for="socksBind">隧道 SOCKS5 代理</label>
-      <input id="socksBind" type="text" placeholder="127.0.0.1:11080">
-    </div>
-    <div class="field">
-      <label for="idleMinutes">闲置自动关闭（分钟）</label>
-      <input id="idleMinutes" type="number" min="1" max="1440">
-    </div>
-    <div class="field">
-      <label for="startSeconds">隧道启动超时（秒）</label>
-      <input id="startSeconds" type="number" min="3" max="180">
-    </div>
-    <div class="field wide">
-      <label for="proxyDomains">隧道强制代理的域名（逗号分隔，留空=仅接口地址的主机）</label>
-      <input id="proxyDomains" type="text" placeholder="token.nuaa.edu.cn">
-    </div>
-    <div class="field wide">
-      <label for="tunnelEnabled">按需启动私有隧道</label>
-      <select id="tunnelEnabled" style="background:#232326;border:1px solid #35353a;border-radius:7px;color:#e6e6e8;padding:7px 9px;font:inherit">
-        <option value="true">开启（校外自动启动 VPN）</option>
-        <option value="false">关闭（只在校园网内直连）</option>
-      </select>
-    </div>
+    <section class="group">
+      <h3 class="section">账号与凭据</h3>
+      <div class="field">
+        <label for="studentId">学号</label>
+        <input id="studentId" type="text" placeholder="例如 2023000000">
+      </div>
+      <div class="field">
+        <label for="password">校园网密码</label>
+        <input id="password" type="password" placeholder="留空则不修改">
+        <span class="hint" id="passwordHint"></span>
+      </div>
+      <div class="field wide">
+        <label for="apiKey">智小航 API Key</label>
+        <input id="apiKey" type="password" placeholder="留空则不修改">
+        <span class="hint" id="apiKeyHint"></span>
+      </div>
+    </section>
+
+    <section class="group">
+      <h3 class="section">服务与端点</h3>
+      <div class="field wide">
+        <label for="baseUrl">接口地址</label>
+        <input id="baseUrl" type="text" placeholder="https://token.nuaa.edu.cn/v1">
+      </div>
+      <div class="field">
+        <label for="gatewayPort">网关端口</label>
+        <input id="gatewayPort" type="number" min="1024" max="65535">
+        <span class="hint">PI-Desktop 里填 http://127.0.0.1:端口/v1</span>
+      </div>
+      <div class="field">
+        <label for="rpm">限流（每分钟请求数）</label>
+        <input id="rpm" type="number" min="1" max="10000">
+        <span class="hint">28 RPM 滑动窗口；超出会排队而不是直接拒绝</span>
+      </div>
+    </section>
+
+    <section class="group">
+      <h3 class="section">校园网隧道</h3>
+      <div class="field wide">
+        <label for="tunnelEnabled">按需启动私有隧道</label>
+        <select id="tunnelEnabled">
+          <option value="true">开启（校外自动启动 VPN）</option>
+          <option value="false">关闭（只在校园网内直连）</option>
+        </select>
+        <span class="hint">关闭后网关只走直连；校外会直接报错而不是等待隧道</span>
+      </div>
+      <div class="field">
+        <label for="httpBind">隧道 HTTP 代理</label>
+        <input id="httpBind" type="text" placeholder="127.0.0.1:11081">
+      </div>
+      <div class="field">
+        <label for="socksBind">隧道 SOCKS5 代理</label>
+        <input id="socksBind" type="text" placeholder="127.0.0.1:11080">
+      </div>
+      <div class="field wide">
+        <label for="proxyDomains">隧道强制代理的域名（逗号分隔，留空=仅接口地址的主机）</label>
+        <input id="proxyDomains" type="text" placeholder="token.nuaa.edu.cn">
+      </div>
+      <div class="field">
+        <label for="idleMinutes">闲置自动关闭（分钟）</label>
+        <input id="idleMinutes" type="number" min="1" max="1440">
+      </div>
+      <div class="field">
+        <label for="startSeconds">隧道启动超时（秒）</label>
+        <input id="startSeconds" type="number" min="3" max="180">
+      </div>
+    </section>
   </form>
 
   <div class="actions">
