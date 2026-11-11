@@ -709,6 +709,49 @@ async function main() {
   });
 
   await suite('模块2: 隧道不可用时 ensureReady 返回 false 且记录原因', async () => {
+  await suite('模块2: 外部隧道消失后不再死守 ready，改为自己拉起', async () => {
+    const cfg = baseConfig({
+      tunnel: { ...baseConfig().tunnel, enabled: true, httpBind: '127.0.0.1:11999', socksBind: '127.0.0.1:11998', externalCheckMs: 30000 },
+    });
+    let spawnCount = 0;
+    let portOpen = true;
+    const portQueue = [];
+    let portChecks = 0;
+    let nowMs = 5_000_000;
+    const manager = new TunnelManager({
+      packageRoot: root,
+      getConfig: () => cfg,
+      log: () => {},
+      deps: {
+        spawn: () => { spawnCount += 1; const { EventEmitter } = require('node:events'); const child = new EventEmitter(); child.pid = 5001; child.stdout = new EventEmitter(); child.stderr = new EventEmitter(); return child; },
+        // 队列优先（模拟外部隧道探活失败）；之后按「已 spawn 就绪、否则看 portOpen」判定
+        waitForPort: async () => { portChecks += 1; if (portQueue.length > 0) return portQueue.shift(); return spawnCount > 0 ? true : portOpen; },
+        connectProbe: async () => true,
+        now: () => nowMs,
+      },
+    });
+
+    // 模拟「用户自己的 zju-connect 已经在跑」：直接复用，不拉起自己的进程
+    const reusable = await manager.ensureReady('probe:offline');
+    assert.strictEqual(reusable, true);
+    assert.strictEqual(manager.status().external, true, '端口已在监听时应复用外部隧道');
+    assert.strictEqual(spawnCount, 0, '复用外部隧道时不得启动自己的进程');
+
+    // 节流：间隔内不再探活（否则每个请求都要等端口检查）
+    const before = portChecks;
+    nowMs += 5_000;
+    await manager.ensureReady('again');
+    assert.strictEqual(portChecks, before, 'externalCheckMs 内不应重复探活');
+
+    // 外部隧道没了：超过间隔后探活失败，必须降级为自己拉起
+    portOpen = false;
+    nowMs += 40_000;
+    const revived = await manager.ensureReady('external died');
+    assert.strictEqual(revived, true, '应改为自己拉起并成功');
+    assert.strictEqual(spawnCount, 1, '外部隧道消失后必须启动自己的 zju-connect');
+    manager.disposeIdleTimer();
+  });
+
     const cfg = baseConfig({
       tunnel: { ...baseConfig().tunnel, enabled: true, httpBind: '127.0.0.1:11995', socksBind: '127.0.0.1:11994', exePath: 'bin/does-not-exist.exe' },
     });
