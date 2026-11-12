@@ -906,6 +906,8 @@ async function main() {
   if (failed.length > 0) {
     for (const f of failed) console.log(` - ${f.name}: ${f.error && f.error.stack ? f.error.stack.split('\n').slice(0, 4).join('\n   ') : f.error}`);
     process.exit(1);
+  } else {
+    process.exit(0);
   }
 }
 
